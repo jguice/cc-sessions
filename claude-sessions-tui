@@ -1,0 +1,771 @@
+#!/Users/josh/.local/share/claude-sessions-venv/bin/python3
+"""Claude Code Session Browser - A TUI for managing sessions across all projects."""
+
+import json
+import os
+import re
+import shutil
+import glob
+import time
+import sys
+from pathlib import Path
+
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.containers import Horizontal, Vertical
+from textual.screen import ModalScreen
+from textual.widgets import (
+    Footer,
+    Header,
+    Input,
+    Label,
+    Markdown,
+    Static,
+    Tree,
+)
+from textual.widgets.tree import TreeNode
+from rich.text import Text
+
+# ---------------------------------------------------------------------------
+# Data helpers
+# ---------------------------------------------------------------------------
+
+HOME = os.path.expanduser("~")
+PROJECTS_BASE = os.path.join(HOME, ".claude", "projects")
+ARCHIVE_DIR = os.path.join(HOME, ".claude", "archived-sessions")
+CONFIG_DIR = os.path.join(HOME, ".config", "claude-sessions")
+NAMES_FILE = os.path.join(CONFIG_DIR, "session-names.json")
+PREFS_FILE = os.path.join(CONFIG_DIR, "prefs.json")
+
+SORT_MODES = ["recency", "size", "name"]
+
+# Nerd Font icons
+ICON_FOLDER = "\uf07b"       #
+ICON_SESSION = "\uf120"      #
+ICON_CLOCK = "\uf017"        #
+ICON_SIZE = "\uf200"         #
+ICON_CHECK = "\uf00c"        #
+ICON_SEARCH = "\uf002"       #
+ICON_SORT = "\uf0dc"         #
+ICON_ARCHIVE = "\uf187"      #
+ICON_DELETE = "\uf1f8"       #
+ICON_RENAME = "\uf044"       #
+ICON_CLAUDE = "\uf544"       #
+
+
+def human_size(nbytes: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if nbytes < 1024:
+            return f"{nbytes}{unit}" if unit == "B" else f"{nbytes:.1f}{unit}"
+        nbytes /= 1024
+    return f"{nbytes:.1f}TB"
+
+
+def human_age(seconds: float) -> str:
+    if seconds < 3600:
+        return f"{int(seconds / 60)}m ago"
+    if seconds < 86400:
+        return f"{int(seconds / 3600)}h ago"
+    return f"{int(seconds / 86400)}d ago"
+
+
+def condense_path(path: str) -> str:
+    short = path.replace(HOME, "~")
+    parts = short.split("/")
+    if len(parts) > 2:
+        return "/".join([parts[0]] + [p[0] if p else p for p in parts[1:-1]] + [parts[-1]])
+    return short
+
+
+def load_session_names() -> dict:
+    if os.path.exists(NAMES_FILE):
+        try:
+            with open(NAMES_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def save_session_names(names: dict):
+    os.makedirs(os.path.dirname(NAMES_FILE), exist_ok=True)
+    with open(NAMES_FILE, "w") as f:
+        json.dump(names, f, indent=2)
+
+
+def load_sessions():
+    """Scan all session files and return a list of session dicts."""
+    sessions = []
+    for jsonl_path in glob.glob(os.path.join(PROJECTS_BASE, "*", "*.jsonl")):
+        if "/subagents/" in jsonl_path:
+            continue
+        mtime = os.path.getmtime(jsonl_path)
+        session_id = os.path.basename(jsonl_path).replace(".jsonl", "")
+        fsize = os.path.getsize(jsonl_path)
+        cwd = ""
+        first_msg = ""
+        first_msg_raw = ""
+        try:
+            with open(jsonl_path) as f:
+                for i, line in enumerate(f):
+                    if i > 50:
+                        break
+                    try:
+                        d = json.loads(line)
+                    except Exception:
+                        continue
+                    if not cwd and d.get("cwd"):
+                        cwd = d["cwd"]
+                    if not first_msg and d.get("type") == "user":
+                        content = d.get("message", {}).get("content", "")
+                        if isinstance(content, list):
+                            for c in content:
+                                if isinstance(c, dict) and c.get("type") == "text":
+                                    text = c["text"].strip()
+                                    text = re.sub(r"<[^>]+>", "", text).strip()
+                                    if text:
+                                        first_msg_raw = text
+                                        first_msg = text.replace("\n", " ")
+                                        break
+                        elif isinstance(content, str):
+                            text = re.sub(r"<[^>]+>", "", content).strip()
+                            first_msg_raw = text
+                            first_msg = text.replace("\n", " ")
+                    if cwd and first_msg:
+                        break
+        except Exception:
+            continue
+        if cwd:
+            sessions.append({
+                "mtime": mtime,
+                "session_id": session_id,
+                "cwd": cwd,
+                "cwd_short": cwd.replace(HOME, "~"),
+                "cwd_condensed": condense_path(cwd),
+                "first_msg": first_msg,
+                "first_msg_raw": first_msg_raw,
+                "path": jsonl_path,
+                "size": fsize,
+                "age": time.time() - mtime,
+            })
+    return sessions
+
+
+def group_sessions(sessions, sort_mode="recency"):
+    """Group sessions by directory and sort."""
+    from collections import defaultdict
+    groups = defaultdict(list)
+    for s in sessions:
+        groups[s["cwd"]].append(s)
+
+    for items in groups.values():
+        # Sessions within a group always sort by recency first,
+        # then by the selected secondary sort
+        if sort_mode == "size":
+            items.sort(key=lambda x: -x["size"])
+        else:
+            items.sort(key=lambda x: -x["mtime"])
+
+    sorted_groups = []
+    for cwd, items in groups.items():
+        sorted_groups.append((items[0]["mtime"], cwd, items))
+
+    # Sort groups: by name sorts directories alphabetically, others by most recent session
+    if sort_mode == "name":
+        sorted_groups.sort(key=lambda x: condense_path(x[1]).lower())
+    else:
+        sorted_groups.sort(key=lambda x: -x[0])
+    return sorted_groups
+
+
+def render_table(table_text: str) -> str:
+    """Convert a markdown table to aligned plain text with box-drawing chars."""
+    lines = [l.strip() for l in table_text.strip().split("\n") if l.strip()]
+    if len(lines) < 2:
+        return table_text
+    rows = []
+    for i, l in enumerate(lines):
+        if i == 1:
+            continue
+        cells = [c.strip() for c in l.split("|")[1:-1]]
+        rows.append(cells)
+    if not rows:
+        return table_text
+    ncols = max(len(r) for r in rows)
+    widths = [0] * ncols
+    for r in rows:
+        for j, c in enumerate(r):
+            if j < ncols:
+                widths[j] = max(widths[j], len(c))
+    out = []
+    sep = "\u2500" + "\u2500\u253c\u2500".join("\u2500" * (w + 1) for w in widths) + "\u2500"
+    for i, r in enumerate(rows):
+        padded = []
+        for j in range(ncols):
+            val = r[j] if j < len(r) else ""
+            padded.append(val.ljust(widths[j]))
+        out.append(" " + " \u2502 ".join(padded))
+        if i == 0:
+            out.append(sep)
+    return "\n".join(out)
+
+
+def prepare_markdown(msg: str) -> str:
+    """Pre-process markdown: convert tables to code blocks for proper rendering."""
+    table_pattern = re.compile(r"(\n?\|[^\n]+\|\n\|[\s:|-]+\|\n(?:\|[^\n]+\|\n?)+)")
+    return table_pattern.sub(
+        lambda m: "\n```\n" + render_table(m.group(0)) + "\n```\n", msg
+    )
+
+
+# ---------------------------------------------------------------------------
+# Confirmation dialog
+# ---------------------------------------------------------------------------
+
+class ConfirmDialog(ModalScreen[bool]):
+    """A simple yes/no confirmation dialog."""
+
+    BINDINGS = [
+        Binding("y", "confirm", "Yes"),
+        Binding("n", "cancel", "No"),
+        Binding("escape", "cancel", "Cancel"),
+    ]
+
+    def __init__(self, message: str):
+        super().__init__()
+        self.message = message
+
+    def compose(self) -> ComposeResult:
+        yield Vertical(
+            Static(self.message, id="confirm-message"),
+            Static("[y] Yes  [n] No", id="confirm-keys"),
+            id="confirm-dialog",
+        )
+
+    def action_confirm(self):
+        self.dismiss(True)
+
+    def action_cancel(self):
+        self.dismiss(False)
+
+
+# ---------------------------------------------------------------------------
+# Rename dialog
+# ---------------------------------------------------------------------------
+
+class RenameDialog(ModalScreen[str]):
+    """Dialog for naming/renaming a session."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+    ]
+
+    def __init__(self, current_name: str = ""):
+        super().__init__()
+        self.current_name = current_name
+
+    def compose(self) -> ComposeResult:
+        yield Vertical(
+            Static("Enter session name:", id="rename-label"),
+            Input(value=self.current_name, id="rename-input"),
+            Static("[enter] Save  [esc] Cancel", id="rename-keys"),
+            id="rename-dialog",
+        )
+
+    def on_mount(self):
+        self.query_one("#rename-input", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted):
+        self.dismiss(event.value)
+
+    def action_cancel(self):
+        self.dismiss("")
+
+
+# ---------------------------------------------------------------------------
+# Main App
+# ---------------------------------------------------------------------------
+
+class SessionBrowser(App):
+    """Browse and manage Claude Code sessions."""
+
+    CSS = """
+    #main {
+        height: 1fr;
+    }
+    #session-tree {
+        width: 1fr;
+        min-width: 40;
+        scrollbar-size: 1 1;
+    }
+    #preview-pane {
+        width: 50%;
+        overflow-y: auto;
+        border-left: solid $accent;
+    }
+    #search-bar {
+        dock: top;
+        height: 3;
+        display: none;
+    }
+    #search-input {
+        width: 100%;
+    }
+    #status-bar {
+        dock: bottom;
+        height: 1;
+        background: $surface;
+        color: $text-muted;
+        padding: 0 1;
+    }
+
+    /* Confirm dialog */
+    #confirm-dialog {
+        align: center middle;
+        width: 50;
+        height: 7;
+        border: thick $error;
+        background: $surface;
+        padding: 1 2;
+    }
+    #confirm-message {
+        text-align: center;
+        margin-bottom: 1;
+    }
+    #confirm-keys {
+        text-align: center;
+        color: $text-muted;
+    }
+
+    /* Rename dialog */
+    #rename-dialog {
+        align: center middle;
+        width: 60;
+        height: 8;
+        border: thick $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+    #rename-label {
+        margin-bottom: 1;
+    }
+    #rename-keys {
+        color: $text-muted;
+        margin-top: 1;
+    }
+    """
+
+    BINDINGS = [
+        Binding("q", "quit", "Quit"),
+        Binding("escape", "quit", "Quit", show=False),
+        Binding("slash", "search", f"{ICON_SEARCH} Search"),
+        Binding("s", "cycle_sort", f"{ICON_SORT} Sort"),
+        Binding("x", "delete", f"{ICON_DELETE} Delete"),
+        Binding("a", "archive", f"{ICON_ARCHIVE} Archive"),
+        Binding("shift+x", "delete_selected", "Del All", show=False),
+        Binding("shift+a", "archive_selected", "Arc All", show=False),
+        Binding("n", "rename", f"{ICON_RENAME} Name"),
+        Binding("space", "toggle_select", "Select", show=False),
+        # Vi navigation
+        Binding("g", "scroll_home", "Top", show=False),
+        Binding("shift+g", "scroll_end", "Bottom", show=False),
+        Binding("ctrl_u", "page_up", "PgUp", show=False),
+        Binding("ctrl_d", "page_down", "PgDn", show=False),
+        Binding("ctrl_f", "page_down", "PgDn", show=False),
+        Binding("ctrl_b", "page_up", "PgUp", show=False),
+    ]
+
+    def __init__(self):
+        super().__init__()
+        prefs = self._load_prefs()
+        self.theme = prefs.get("theme", "gruvbox")
+        self.sessions = load_sessions()
+        self.session_names = load_session_names()
+        self.sort_mode = "name"
+        self.selected_ids: set[str] = set()
+        self.filter_text = ""
+        self._resume_session = None  # set when user picks a session to resume
+
+    TITLE = f"{ICON_CLAUDE} Claude Sessions"
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=False, icon="")
+        with Vertical(id="search-bar"):
+            yield Input(placeholder=f"{ICON_SEARCH} Search sessions...", id="search-input")
+        with Horizontal(id="main"):
+            yield Tree("Sessions", id="session-tree")
+            yield Vertical(
+                Markdown("", id="preview"),
+                id="preview-pane",
+            )
+        yield Static("", id="status-bar")
+        yield Footer()
+
+    def on_mount(self):
+        tree = self.query_one("#session-tree", Tree)
+        tree.show_root = False
+        tree.guide_depth = 3
+        self._rebuild_tree()
+        self._update_status()
+        sort_label = "folder name" if self.sort_mode == "name" else self.sort_mode
+        self.sub_title = f"sorted by {sort_label}"
+        tree.focus()
+
+    def watch_theme(self, new_theme: str) -> None:
+        """Rebuild tree when theme changes so colors update, and save preference."""
+        try:
+            self.query_one("#session-tree", Tree)
+            self._rebuild_tree()
+        except Exception:
+            pass  # tree not mounted yet
+        self._save_prefs()
+
+    @staticmethod
+    def _load_prefs() -> dict:
+        if os.path.exists(PREFS_FILE):
+            try:
+                with open(PREFS_FILE) as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {}
+
+    def _save_prefs(self):
+        prefs = self._load_prefs()
+        prefs["theme"] = self.theme
+        os.makedirs(os.path.dirname(PREFS_FILE), exist_ok=True)
+        with open(PREFS_FILE, "w") as f:
+            json.dump(prefs, f, indent=2)
+
+    # -- Tree building --
+
+    def _rebuild_tree(self):
+        tree = self.query_one("#session-tree", Tree)
+        tree.clear()
+
+        # Pull colors from the active theme
+        theme = self.current_theme
+        accent = theme.accent if theme else "#fabd2f"
+        primary = theme.primary if theme else "#85A598"
+        secondary = theme.secondary if theme else "#A89A85"
+        success = theme.success if theme else "#b8bb26"
+
+        filtered = self.sessions
+        if self.filter_text:
+            ft = self.filter_text.lower()
+            filtered = [
+                s for s in self.sessions
+                if ft in s["first_msg"].lower()
+                or ft in s["cwd_short"].lower()
+                or ft in s["session_id"].lower()
+                or ft in self.session_names.get(s["session_id"], "").lower()
+            ]
+
+        groups = group_sessions(filtered, self.sort_mode)
+
+        for _, cwd, items in groups:
+            cwd_condensed = condense_path(cwd)
+            cwd_short = cwd.replace(HOME, "~")
+
+            # Directory label with folder icon, using theme colors
+            dir_text = Text()
+            dir_text.append(f"{ICON_FOLDER} ", style=f"bold {accent}")
+            dir_text.append(f"{cwd_condensed} ", style=f"bold {primary}")
+            dir_text.append(f"({len(items)})", style="dim")
+            dir_node = tree.root.add(dir_text, expand=False)
+            dir_node.data = None  # directory nodes have no session data
+
+            for s in items:
+                age = human_age(s["age"])
+                size = human_size(s["size"])
+                name = self.session_names.get(s["session_id"], "")
+
+                label = Text()
+                if s["session_id"] in self.selected_ids:
+                    label.append(f"{ICON_CHECK} ", style=f"bold {success}")
+                label.append(f"{ICON_CLOCK} {age:>7} ", style=f"{accent}")
+                label.append(f"{ICON_SIZE} {size:>7}", style="dim")
+                label.append("  ", style="")
+                if name:
+                    label.append(f"[{name}] ", style=f"bold {secondary}")
+                label.append(s["first_msg"])
+
+                leaf = dir_node.add_leaf(label)
+                leaf.data = s
+
+    def _update_status(self):
+        total = len(self.sessions)
+        selected = len(self.selected_ids)
+        sort_label = self.sort_mode.capitalize()
+        parts = [f"{ICON_SESSION} {total} sessions", f"{ICON_SORT} {sort_label}"]
+        if selected:
+            parts.append(f"{selected} selected")
+        if self.filter_text:
+            parts.append(f"Filter: {self.filter_text}")
+        self.query_one("#status-bar", Static).update(" | ".join(parts))
+
+    def _update_preview(self, session: dict | None):
+        preview = self.query_one("#preview", Markdown)
+        if session is None:
+            preview.update("")
+            return
+
+        sid = session["session_id"]
+        name = self.session_names.get(sid, "")
+        size = human_size(session["size"])
+        name_line = f"\n**Name:** {name}" if name else ""
+
+        msg = prepare_markdown(session.get("first_msg_raw", ""))
+
+        md = f"""**Session:** {sid}{name_line}
+**Directory:** {session['cwd_short']}
+**Size:** {size}
+
+---
+
+{msg}
+"""
+        preview.update(md)
+
+    # -- Event handlers --
+
+    def on_tree_node_selected(self, event: Tree.NodeSelected):
+        """When Enter is pressed on a tree node."""
+        node = event.node
+        if node.data is None:
+            # Directory node: toggle expand/collapse
+            node.toggle()
+        else:
+            # Session node: resume it
+            self._resume_session = node.data
+            self.exit()
+
+    def on_tree_node_highlighted(self, event: Tree.NodeHighlighted):
+        """Update preview when cursor moves."""
+        node = event.node
+        if node.data is not None:
+            self._update_preview(node.data)
+        else:
+            self._update_preview(None)
+
+    # -- Vi navigation --
+
+    def action_scroll_home(self):
+        tree = self.query_one("#session-tree", Tree)
+        tree.action_scroll_home()
+
+    def action_scroll_end(self):
+        tree = self.query_one("#session-tree", Tree)
+        tree.action_scroll_end()
+
+    def action_page_up(self):
+        tree = self.query_one("#session-tree", Tree)
+        tree.scroll_page_up()
+
+    def action_page_down(self):
+        tree = self.query_one("#session-tree", Tree)
+        tree.scroll_page_down()
+
+    def on_key(self, event):
+        """Handle vi keys and left/right arrows for tree navigation."""
+        tree = self.query_one("#session-tree", Tree)
+        node = tree.cursor_node
+        if node is None:
+            return
+
+        # h/l map to left/right (expand/collapse), j/k map to down/up
+        if event.key in ("left", "h"):
+            if node.data is None and node.is_expanded:
+                node.collapse()
+                event.prevent_default()
+            elif node.data is not None:
+                if node.parent and node.parent != tree.root:
+                    tree.select_node(node.parent)
+                    node.parent.collapse()
+                    event.prevent_default()
+            elif node.data is None and not node.is_expanded:
+                # Already collapsed dir: move to parent
+                if node.parent and node.parent != tree.root:
+                    tree.select_node(node.parent)
+                    event.prevent_default()
+        elif event.key in ("right", "l"):
+            if node.data is None and not node.is_expanded:
+                node.expand()
+                event.prevent_default()
+            elif node.data is None and node.is_expanded:
+                # Already expanded: move to first child
+                if node.children:
+                    tree.select_node(node.children[0])
+                    event.prevent_default()
+        elif event.key == "j":
+            tree.action_cursor_down()
+            event.prevent_default()
+        elif event.key == "k":
+            tree.action_cursor_up()
+            event.prevent_default()
+        elif event.key == "escape":
+            search_bar = self.query_one("#search-bar")
+            if search_bar.styles.display != "none":
+                self._close_search()
+                event.prevent_default()
+
+    # -- Actions --
+
+    def action_search(self):
+        search_bar = self.query_one("#search-bar")
+        search_input = self.query_one("#search-input", Input)
+        if search_bar.styles.display == "none":
+            search_bar.styles.display = "block"
+            search_input.value = self.filter_text
+            search_input.focus()
+        else:
+            self._close_search()
+
+    def _close_search(self):
+        self.query_one("#search-bar").styles.display = "none"
+        self.query_one("#session-tree", Tree).focus()
+
+    def on_input_changed(self, event: Input.Changed):
+        if event.input.id == "search-input":
+            self.filter_text = event.value
+            self._rebuild_tree()
+            self._update_status()
+
+    def on_input_submitted(self, event: Input.Submitted):
+        if event.input.id == "search-input":
+            self.query_one("#search-bar").styles.display = "none"
+            self.query_one("#session-tree", Tree).focus()
+
+    def action_cycle_sort(self):
+        idx = SORT_MODES.index(self.sort_mode)
+        self.sort_mode = SORT_MODES[(idx + 1) % len(SORT_MODES)]
+        self._rebuild_tree()
+        self._update_status()
+        sort_label = "folder name" if self.sort_mode == "name" else self.sort_mode
+        self.sub_title = f"sorted by {sort_label}"
+
+    def action_toggle_select(self):
+        tree = self.query_one("#session-tree", Tree)
+        node = tree.cursor_node
+        if node and node.data:
+            sid = node.data["session_id"]
+            if sid in self.selected_ids:
+                self.selected_ids.discard(sid)
+            else:
+                self.selected_ids.add(sid)
+            self._rebuild_tree()
+            self._update_status()
+
+    def action_delete(self):
+        tree = self.query_one("#session-tree", Tree)
+        node = tree.cursor_node
+        if node and node.data:
+            s = node.data
+            name = self.session_names.get(s["session_id"], s["session_id"][:12])
+            self.push_screen(
+                ConfirmDialog(f"Delete session '{name}' permanently?"),
+                callback=lambda ok: self._do_delete([s]) if ok else None,
+            )
+
+    def action_archive(self):
+        tree = self.query_one("#session-tree", Tree)
+        node = tree.cursor_node
+        if node and node.data:
+            s = node.data
+            name = self.session_names.get(s["session_id"], s["session_id"][:12])
+            self.push_screen(
+                ConfirmDialog(f"Archive session '{name}'?"),
+                callback=lambda ok: self._do_archive([s]) if ok else None,
+            )
+
+    def action_delete_selected(self):
+        if not self.selected_ids:
+            return
+        targets = [s for s in self.sessions if s["session_id"] in self.selected_ids]
+        self.push_screen(
+            ConfirmDialog(f"Delete {len(targets)} sessions permanently?"),
+            callback=lambda ok: self._do_delete(targets) if ok else None,
+        )
+
+    def action_archive_selected(self):
+        if not self.selected_ids:
+            return
+        targets = [s for s in self.sessions if s["session_id"] in self.selected_ids]
+        self.push_screen(
+            ConfirmDialog(f"Archive {len(targets)} sessions?"),
+            callback=lambda ok: self._do_archive(targets) if ok else None,
+        )
+
+    def action_rename(self):
+        tree = self.query_one("#session-tree", Tree)
+        node = tree.cursor_node
+        if node and node.data:
+            sid = node.data["session_id"]
+            current = self.session_names.get(sid, "")
+            self.push_screen(
+                RenameDialog(current),
+                callback=lambda name: self._do_rename(sid, name),
+            )
+
+    def _do_delete(self, targets: list[dict]):
+        for s in targets:
+            try:
+                os.remove(s["path"])
+                # Remove subagents dir too
+                subdir = os.path.join(os.path.dirname(s["path"]), "subagents")
+                if os.path.isdir(subdir):
+                    shutil.rmtree(subdir, ignore_errors=True)
+            except Exception:
+                pass
+            self.selected_ids.discard(s["session_id"])
+        self.sessions = [s for s in self.sessions if s not in targets]
+        self._rebuild_tree()
+        self._update_status()
+        self._update_preview(None)
+
+    def _do_archive(self, targets: list[dict]):
+        os.makedirs(ARCHIVE_DIR, exist_ok=True)
+        for s in targets:
+            try:
+                dest = os.path.join(ARCHIVE_DIR, os.path.basename(s["path"]))
+                shutil.move(s["path"], dest)
+                subdir = os.path.join(os.path.dirname(s["path"]), "subagents")
+                if os.path.isdir(subdir):
+                    shutil.move(subdir, os.path.join(ARCHIVE_DIR, s["session_id"] + "-subagents"))
+            except Exception:
+                pass
+            self.selected_ids.discard(s["session_id"])
+        self.sessions = [s for s in self.sessions if s not in targets]
+        self._rebuild_tree()
+        self._update_status()
+        self._update_preview(None)
+
+    def _do_rename(self, session_id: str, name: str):
+        if not name:
+            self.session_names.pop(session_id, None)
+        else:
+            self.session_names[session_id] = name
+        save_session_names(self.session_names)
+        self._rebuild_tree()
+        self._update_preview_for_current()
+
+    def _update_preview_for_current(self):
+        tree = self.query_one("#session-tree", Tree)
+        node = tree.cursor_node
+        if node and node.data:
+            self._update_preview(node.data)
+
+
+def main():
+    app = SessionBrowser()
+    app.run()
+
+    # After the app exits, if a session was selected, print the resume command
+    if app._resume_session:
+        s = app._resume_session
+        # Output the cd + resume command for the fish wrapper to execute
+        print(f"RESUME\t{s['cwd']}\t{s['session_id']}")
+
+
+if __name__ == "__main__":
+    main()
