@@ -8,10 +8,12 @@ import shutil
 import glob
 import time
 import sys
+from functools import partial
 from pathlib import Path
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.command import Hit, Hits, Provider
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import (
@@ -283,11 +285,45 @@ class RenameDialog(ModalScreen[str]):
 
 
 # ---------------------------------------------------------------------------
+# Command palette provider
+# ---------------------------------------------------------------------------
+
+class SessionCommands(Provider):
+    """Custom commands for the command palette."""
+
+    async def search(self, query: str) -> Hits:
+        app = self.app
+        commands = [
+            ("Expand All Groups", "Expand all directory groups", "expand_all"),
+            ("Collapse All Groups", "Collapse all directory groups", "collapse_all"),
+            ("Sort by Folder Name", "Sort groups alphabetically by folder", "sort_name"),
+            ("Sort by Recency", "Sort groups by most recent session", "sort_recency"),
+            ("Sort by Size", "Sort groups by session size", "sort_size"),
+            ("Search Sessions", "Filter sessions by text", "search"),
+            ("Clear Search", "Remove search filter", "clear_search"),
+            ("Archive Session", "Archive the selected session", "archive"),
+            ("Delete Session", "Permanently delete the selected session", "delete"),
+            ("Rename Session", "Name or rename the selected session", "rename"),
+            ("Toggle Skip Permissions", "Resume sessions with --dangerously-skip-permissions", "toggle_skip_perms"),
+        ]
+        for name, help_text, action in commands:
+            if query.lower() in name.lower() or query.lower() in help_text.lower():
+                yield Hit(
+                    1.0 - (len(query) / len(name) if query else 0),
+                    name,
+                    partial(app.run_palette_command, action),
+                    help=help_text,
+                )
+
+
+# ---------------------------------------------------------------------------
 # Main App
 # ---------------------------------------------------------------------------
 
 class SessionBrowser(App):
     """Browse and manage Claude Code sessions."""
+
+    COMMANDS = App.COMMANDS | {SessionCommands}
 
     CSS = """
     #main {
@@ -366,6 +402,8 @@ class SessionBrowser(App):
         Binding("shift+a", "archive_selected", "Arc All", show=False),
         Binding("n", "rename", f"{ICON_RENAME} Name"),
         Binding("space", "toggle_select", "Select", show=False),
+        Binding("e", "expand_all", "Expand All"),
+        Binding("shift+e", "collapse_all", "Collapse All", show=False),
         # Vi navigation
         Binding("g", "scroll_home", "Top", show=False),
         Binding("shift+g", "scroll_end", "Bottom", show=False),
@@ -636,6 +674,57 @@ class SessionBrowser(App):
             self.query_one("#search-bar").styles.display = "none"
             self.query_one("#session-tree", Tree).focus()
 
+    def action_expand_all(self):
+        tree = self.query_one("#session-tree", Tree)
+        for node in tree.root.children:
+            node.expand()
+
+    def action_collapse_all(self):
+        tree = self.query_one("#session-tree", Tree)
+        for node in tree.root.children:
+            node.collapse()
+
+    def run_palette_command(self, command: str):
+        """Execute a command from the command palette."""
+        actions = {
+            "expand_all": self.action_expand_all,
+            "collapse_all": self.action_collapse_all,
+            "sort_name": lambda: self._set_sort("name"),
+            "sort_recency": lambda: self._set_sort("recency"),
+            "sort_size": lambda: self._set_sort("size"),
+            "search": self.action_search,
+            "clear_search": self._clear_search,
+            "archive": self.action_archive,
+            "delete": self.action_delete,
+            "rename": self.action_rename,
+            "toggle_skip_perms": self._toggle_skip_perms,
+        }
+        if command in actions:
+            actions[command]()
+
+    def _set_sort(self, mode: str):
+        self.sort_mode = mode
+        self._rebuild_tree()
+        self._update_status()
+        sort_label = "folder name" if self.sort_mode == "name" else self.sort_mode
+        self.sub_title = f"sorted by {sort_label}"
+
+    def _toggle_skip_perms(self):
+        prefs = self._load_prefs()
+        current = prefs.get("dangerously_skip_permissions", False)
+        prefs["dangerously_skip_permissions"] = not current
+        os.makedirs(os.path.dirname(PREFS_FILE), exist_ok=True)
+        with open(PREFS_FILE, "w") as f:
+            json.dump(prefs, f, indent=2)
+        state = "ON" if not current else "OFF"
+        self._update_status()
+        self.notify(f"Skip permissions: {state}")
+
+    def _clear_search(self):
+        self.filter_text = ""
+        self._rebuild_tree()
+        self._update_status()
+
     def action_cycle_sort(self):
         idx = SORT_MODES.index(self.sort_mode)
         self.sort_mode = SORT_MODES[(idx + 1) % len(SORT_MODES)]
@@ -763,8 +852,9 @@ def main():
     # After the app exits, if a session was selected, print the resume command
     if app._resume_session:
         s = app._resume_session
-        # Output the cd + resume command for the fish wrapper to execute
-        print(f"RESUME\t{s['cwd']}\t{s['session_id']}")
+        prefs = SessionBrowser._load_prefs()
+        skip_perms = "1" if prefs.get("dangerously_skip_permissions", False) else "0"
+        print(f"RESUME\t{s['cwd']}\t{s['session_id']}\t{skip_perms}")
 
 
 if __name__ == "__main__":
