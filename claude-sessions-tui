@@ -291,26 +291,41 @@ class RenameDialog(ModalScreen[str]):
 class SessionCommands(Provider):
     """Custom commands for the command palette."""
 
-    async def search(self, query: str) -> Hits:
+    COMMANDS = [
+        ("Expand All Groups", "Expand all directory groups", "expand_all"),
+        ("Collapse All Groups", "Collapse all directory groups", "collapse_all"),
+        ("Sort by Folder Name", "Sort groups alphabetically by folder", "sort_name"),
+        ("Sort by Recency", "Sort groups by most recent session", "sort_recency"),
+        ("Sort by Size", "Sort groups by session size", "sort_size"),
+        ("Search Sessions", "Filter sessions by text", "search"),
+        ("Clear Search", "Remove search filter", "clear_search"),
+        ("Archive Session", "Archive the selected session", "archive"),
+        ("Delete Session", "Permanently delete the selected session", "delete"),
+        ("Rename Session", "Name or rename the selected session", "rename"),
+        ("Toggle Skip Permissions", "Resume sessions with --dangerously-skip-permissions", "toggle_skip_perms"),
+    ]
+
+    async def discover(self) -> Hits:
+        """Show all commands when palette first opens."""
         app = self.app
-        commands = [
-            ("Expand All Groups", "Expand all directory groups", "expand_all"),
-            ("Collapse All Groups", "Collapse all directory groups", "collapse_all"),
-            ("Sort by Folder Name", "Sort groups alphabetically by folder", "sort_name"),
-            ("Sort by Recency", "Sort groups by most recent session", "sort_recency"),
-            ("Sort by Size", "Sort groups by session size", "sort_size"),
-            ("Search Sessions", "Filter sessions by text", "search"),
-            ("Clear Search", "Remove search filter", "clear_search"),
-            ("Archive Session", "Archive the selected session", "archive"),
-            ("Delete Session", "Permanently delete the selected session", "delete"),
-            ("Rename Session", "Name or rename the selected session", "rename"),
-            ("Toggle Skip Permissions", "Resume sessions with --dangerously-skip-permissions", "toggle_skip_perms"),
-        ]
-        for name, help_text, action in commands:
-            if query.lower() in name.lower() or query.lower() in help_text.lower():
+        for name, help_text, action in self.COMMANDS:
+            yield Hit(
+                1.0,
+                name,
+                partial(app.run_palette_command, action),
+                help=help_text,
+            )
+
+    async def search(self, query: str) -> Hits:
+        """Filter commands by search query."""
+        app = self.app
+        matcher = self.matcher(query)
+        for name, help_text, action in self.COMMANDS:
+            score = matcher.match(name)
+            if score > 0:
                 yield Hit(
-                    1.0 - (len(query) / len(name) if query else 0),
-                    name,
+                    score,
+                    matcher.highlight(name),
                     partial(app.run_palette_command, action),
                     help=help_text,
                 )
