@@ -1,5 +1,5 @@
-#!/Users/josh/.local/share/claude-sessions-venv/bin/python3
-"""Claude Code Session Browser - A TUI for managing sessions across all projects."""
+#!/usr/bin/env python3
+"""cc-sessions - A TUI for browsing and managing Claude Code sessions."""
 
 import json
 import os
@@ -35,7 +35,7 @@ from rich.text import Text
 HOME = os.path.expanduser("~")
 PROJECTS_BASE = os.path.join(HOME, ".claude", "projects")
 ARCHIVE_DIR = os.path.join(HOME, ".claude", "archived-sessions")
-CONFIG_DIR = os.path.join(HOME, ".config", "claude-sessions")
+CONFIG_DIR = os.path.join(HOME, ".config", "cc-sessions")
 NAMES_FILE = os.path.join(CONFIG_DIR, "session-names.json")
 PREFS_FILE = os.path.join(CONFIG_DIR, "prefs.json")
 

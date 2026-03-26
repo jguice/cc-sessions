@@ -2,11 +2,11 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-VENV_DIR="$HOME/.local/share/claude-sessions-venv"
+VENV_DIR="$HOME/.local/share/cc-sessions-venv"
 BIN_DIR="$HOME/.local/bin"
 FISH_FUNCTIONS="$HOME/.config/fish/functions"
 
-echo "Installing claude-sessions..."
+echo "Installing cc-sessions..."
 
 # Create virtual environment and install textual
 if [ ! -d "$VENV_DIR" ]; then
@@ -17,20 +17,27 @@ fi
 echo "Installing dependencies..."
 "$VENV_DIR/bin/pip" install -q textual
 
-# Update shebang to point to the venv python
+# Install TUI binary with correct shebang
 PYTHON_PATH="$VENV_DIR/bin/python3"
-sed "1s|#!.*|#!${PYTHON_PATH}|" "$SCRIPT_DIR/claude-sessions-tui" > "$BIN_DIR/claude-sessions-tui"
-chmod +x "$BIN_DIR/claude-sessions-tui"
+mkdir -p "$BIN_DIR"
+sed "1s|#!.*|#!${PYTHON_PATH}|" "$SCRIPT_DIR/cc-sessions-tui" > "$BIN_DIR/cc-sessions-tui"
+chmod +x "$BIN_DIR/cc-sessions-tui"
 
 # Install fish function
 mkdir -p "$FISH_FUNCTIONS"
-# Update the python path in the fish function too
-sed "s|~/.local/share/claude-sessions-venv/bin/python3|${PYTHON_PATH}|g" \
-    "$SCRIPT_DIR/claude-sessions.fish" > "$FISH_FUNCTIONS/claude-sessions.fish"
+cp "$SCRIPT_DIR/cc-sessions.fish" "$FISH_FUNCTIONS/cc-sessions.fish"
+
+# Migrate config from old name if present
+OLD_CONFIG="$HOME/.config/claude-sessions"
+NEW_CONFIG="$HOME/.config/cc-sessions"
+if [ -d "$OLD_CONFIG" ] && [ ! -d "$NEW_CONFIG" ]; then
+    echo "Migrating config from $OLD_CONFIG to $NEW_CONFIG..."
+    mv "$OLD_CONFIG" "$NEW_CONFIG"
+fi
 
 echo ""
 echo "Installed:"
-echo "  $BIN_DIR/claude-sessions-tui"
-echo "  $FISH_FUNCTIONS/claude-sessions.fish"
+echo "  $BIN_DIR/cc-sessions-tui"
+echo "  $FISH_FUNCTIONS/cc-sessions.fish"
 echo ""
-echo "Run 'claude-sessions' to start."
+echo "Run 'cc-sessions' to start."
