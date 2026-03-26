@@ -9,6 +9,7 @@ import glob
 import time
 import sys
 from functools import partial
+from typing import Dict, List, Optional, Set
 from pathlib import Path
 
 from textual.app import App, ComposeResult
@@ -38,6 +39,7 @@ ARCHIVE_DIR = os.path.join(HOME, ".claude", "archived-sessions")
 CONFIG_DIR = os.path.join(HOME, ".config", "cc-sessions")
 NAMES_FILE = os.path.join(CONFIG_DIR, "session-names.json")
 PREFS_FILE = os.path.join(CONFIG_DIR, "prefs.json")
+HISTORY_FILE = os.path.join(HOME, ".claude", "history.jsonl")
 
 SORT_MODES = ["recency", "size", "name"]
 
@@ -79,14 +81,45 @@ def condense_path(path: str) -> str:
     return short
 
 
+def load_claude_renames() -> dict:
+    """Parse /rename commands from Claude's history.jsonl.
+
+    Later renames for the same session override earlier ones.
+    """
+    names = {}  # type: Dict[str, str]
+    if not os.path.exists(HISTORY_FILE):
+        return names
+    try:
+        with open(HISTORY_FILE) as f:
+            for line in f:
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue
+                display = d.get("display", "")
+                if display.startswith("/rename "):
+                    sid = d.get("sessionId", "")
+                    name = display[len("/rename "):].strip()
+                    if sid and name:
+                        names[sid] = name
+                    elif sid and not name:
+                        names.pop(sid, None)
+    except Exception:
+        pass
+    return names
+
+
 def load_session_names() -> dict:
+    # Claude's /rename commands are the base; local overrides take priority
+    names = load_claude_renames()
     if os.path.exists(NAMES_FILE):
         try:
             with open(NAMES_FILE) as f:
-                return json.load(f)
+                local = json.load(f)
+            names.update(local)
         except Exception:
             pass
-    return {}
+    return names
 
 
 def save_session_names(names: dict):
@@ -422,10 +455,10 @@ class SessionBrowser(App):
         # Vi navigation
         Binding("g", "scroll_home", "Top", show=False),
         Binding("shift+g", "scroll_end", "Bottom", show=False),
-        Binding("ctrl_u", "page_up", "PgUp", show=False),
-        Binding("ctrl_d", "page_down", "PgDn", show=False),
-        Binding("ctrl_f", "page_down", "PgDn", show=False),
-        Binding("ctrl_b", "page_up", "PgUp", show=False),
+        Binding("ctrl+u", "page_up", "PgUp", show=False),
+        Binding("ctrl+d", "page_down", "PgDn", show=False),
+        Binding("ctrl+f", "page_down", "PgDn", show=False),
+        Binding("ctrl+b", "page_up", "PgUp", show=False),
     ]
 
     def __init__(self):
@@ -435,11 +468,11 @@ class SessionBrowser(App):
         self.sessions = load_sessions()
         self.session_names = load_session_names()
         self.sort_mode = "name"
-        self.selected_ids: set[str] = set()
+        self.selected_ids: Set[str] = set()
         self.filter_text = ""
         self._resume_session = None  # set when user picks a session to resume
 
-    TITLE = f"{ICON_CLAUDE} Claude Sessions"
+    TITLE = f"{ICON_CLAUDE} cc-sessions"
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False, icon="")
@@ -557,7 +590,7 @@ class SessionBrowser(App):
             parts.append(f"Filter: {self.filter_text}")
         self.query_one("#status-bar", Static).update(" | ".join(parts))
 
-    def _update_preview(self, session: dict | None):
+    def _update_preview(self, session: Optional[dict]):
         preview = self.query_one("#preview", Markdown)
         if session is None:
             preview.update("")
@@ -811,7 +844,7 @@ class SessionBrowser(App):
                 callback=lambda name: self._do_rename(sid, name),
             )
 
-    def _do_delete(self, targets: list[dict]):
+    def _do_delete(self, targets: List[dict]):
         for s in targets:
             try:
                 os.remove(s["path"])
@@ -827,7 +860,7 @@ class SessionBrowser(App):
         self._update_status()
         self._update_preview(None)
 
-    def _do_archive(self, targets: list[dict]):
+    def _do_archive(self, targets: List[dict]):
         os.makedirs(ARCHIVE_DIR, exist_ok=True)
         for s in targets:
             try:
