@@ -1,6 +1,7 @@
-function claude-sessions --description "Browse and manage Claude Code sessions across all projects"
+function cc-sessions --description "Browse and manage Claude Code sessions across all projects"
     # Run the TUI app and capture its output
-    set -l output (/Users/josh/.local/share/claude-sessions-venv/bin/python3 ~/.local/bin/claude-sessions-tui)
+    set -l venv_dir "$HOME/.local/share/cc-sessions-venv"
+    set -l output ($venv_dir/bin/python3 ~/.local/bin/cc-sessions-tui)
 
     # Output format: RESUME\tcwd\tsession_id\tskip_perms
     if test -n "$output"
