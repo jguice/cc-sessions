@@ -13,6 +13,7 @@ from typing import Dict, List, Optional, Set
 from pathlib import Path
 
 from textual.app import App, ComposeResult
+from textual import work
 from textual.binding import Binding
 from textual.command import Hit, Hits, Provider
 from textual.containers import Horizontal, Vertical
@@ -128,6 +129,25 @@ def save_session_names(names: dict):
         json.dump(names, f, indent=2)
 
 
+def _extract_user_text(d):
+    """Extract user message text from a parsed JSONL entry. Returns (oneline, raw) or None."""
+    if d.get("type") != "user":
+        return None
+    content = d.get("message", {}).get("content", "")
+    if isinstance(content, list):
+        for c in content:
+            if isinstance(c, dict) and c.get("type") == "text":
+                text = c["text"].strip()
+                text = re.sub(r"<[^>]+>", "", text).strip()
+                if text:
+                    return text.replace("\n", " "), text
+    elif isinstance(content, str):
+        text = re.sub(r"<[^>]+>", "", content).strip()
+        if text:
+            return text.replace("\n", " "), text
+    return None
+
+
 def load_sessions():
     """Scan all session files and return a list of session dicts."""
     sessions = []
@@ -141,6 +161,7 @@ def load_sessions():
         first_msg = ""
         first_msg_raw = ""
         try:
+            # Read head for cwd and first message
             with open(jsonl_path) as f:
                 for i, line in enumerate(f):
                     if i > 50:
@@ -151,39 +172,78 @@ def load_sessions():
                         continue
                     if not cwd and d.get("cwd"):
                         cwd = d["cwd"]
-                    if not first_msg and d.get("type") == "user":
-                        content = d.get("message", {}).get("content", "")
-                        if isinstance(content, list):
-                            for c in content:
-                                if isinstance(c, dict) and c.get("type") == "text":
-                                    text = c["text"].strip()
-                                    text = re.sub(r"<[^>]+>", "", text).strip()
-                                    if text:
-                                        first_msg_raw = text
-                                        first_msg = text.replace("\n", " ")
-                                        break
-                        elif isinstance(content, str):
-                            text = re.sub(r"<[^>]+>", "", content).strip()
-                            first_msg_raw = text
-                            first_msg = text.replace("\n", " ")
+                    if not first_msg:
+                        result = _extract_user_text(d)
+                        if result:
+                            first_msg, first_msg_raw = result
                     if cwd and first_msg:
                         break
+
+            # Read tail for last user messages (character budget)
+            TAIL_CHAR_BUDGET = 1500
+            all_tail = []
+            tail_lines = _read_tail_lines(jsonl_path, max_lines=30)
+            for line in tail_lines:
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue
+                result = _extract_user_text(d)
+                if result:
+                    all_tail.append(result)
+            # Walk backwards collecting messages until we hit the budget
+            last_msgs = []
+            last_msgs_raw = []
+            budget = TAIL_CHAR_BUDGET
+            for oneline, raw in reversed(all_tail):
+                if budget <= 0:
+                    break
+                last_msgs.append(oneline)
+                last_msgs_raw.append(raw)
+                budget -= len(raw)
+            last_msgs.reverse()
+            last_msgs_raw.reverse()
         except Exception:
             continue
         if cwd:
+            # Use last message for list display, fall back to first
+            last_msg = last_msgs[-1] if last_msgs else first_msg
+            cwd_short = cwd.replace(HOME, "~")
             sessions.append({
                 "mtime": mtime,
                 "session_id": session_id,
                 "cwd": cwd,
-                "cwd_short": cwd.replace(HOME, "~"),
+                "cwd_short": cwd_short,
                 "cwd_condensed": condense_path(cwd),
                 "first_msg": first_msg,
                 "first_msg_raw": first_msg_raw,
+                "last_msg": last_msg,
+                "last_msgs_raw": last_msgs_raw,
                 "path": jsonl_path,
                 "size": fsize,
                 "age": time.time() - mtime,
+                # Pre-lowered for fast search filtering
+                "_search": (first_msg + " " + last_msg + " " + cwd_short + " " + session_id).lower(),
             })
     return sessions
+
+
+def _read_tail_lines(filepath, max_lines=100):
+    """Read the last max_lines lines from a file efficiently."""
+    try:
+        with open(filepath, "rb") as f:
+            f.seek(0, 2)
+            fsize = f.tell()
+            if fsize == 0:
+                return []
+            # Read up to 128KB from the end
+            chunk_size = min(fsize, 128 * 1024)
+            f.seek(fsize - chunk_size)
+            data = f.read().decode("utf-8", errors="replace")
+            lines = data.splitlines()
+            return lines[-max_lines:]
+    except Exception:
+        return []
 
 
 def group_sessions(sessions, sort_mode="recency"):
@@ -465,12 +525,13 @@ class SessionBrowser(App):
         super().__init__()
         prefs = self._load_prefs()
         self.theme = prefs.get("theme", "gruvbox")
-        self.sessions = load_sessions()
-        self.session_names = load_session_names()
+        self.sessions = []
+        self.session_names = {}
         self.sort_mode = "name"
         self.selected_ids: Set[str] = set()
         self.filter_text = ""
         self._resume_session = None  # set when user picks a session to resume
+        self._loading = True
 
     TITLE = f"{ICON_CLAUDE} cc-sessions"
 
@@ -491,11 +552,24 @@ class SessionBrowser(App):
         tree = self.query_one("#session-tree", Tree)
         tree.show_root = False
         tree.guide_depth = 3
+        tree.root.add_leaf("Loading sessions...")
+        self._load_sessions_async()
+
+    @work(thread=True)
+    def _load_sessions_async(self):
+        sessions = load_sessions()
+        names = load_session_names()
+        self.call_from_thread(self._finish_loading, sessions, names)
+
+    def _finish_loading(self, sessions, names):
+        self.sessions = sessions
+        self.session_names = names
+        self._loading = False
         self._rebuild_tree()
         self._update_status()
         sort_label = "folder name" if self.sort_mode == "name" else self.sort_mode
         self.sub_title = f"sorted by {sort_label}"
-        tree.focus()
+        self.query_one("#session-tree", Tree).focus()
 
     def watch_theme(self, new_theme: str) -> None:
         """Rebuild tree when theme changes so colors update, and save preference."""
@@ -526,58 +600,86 @@ class SessionBrowser(App):
     # -- Tree building --
 
     def _rebuild_tree(self):
+        """Filter, group, and rebuild the tree. Shows a loading indicator for searches."""
+        if self.filter_text and self.sessions:
+            tree = self.query_one("#session-tree", Tree)
+            tree.clear()
+            tree.root.add_leaf("Searching...")
+            self._rebuild_tree_async()
+        else:
+            self._do_rebuild_tree()
+
+    @work(thread=True)
+    def _rebuild_tree_async(self):
+        """Pre-compute filtered groups in a thread, then assemble tree on main thread."""
+        prepared = self._prepare_tree_data()
+        self.call_from_thread(self._assemble_tree, prepared)
+
+    def _prepare_tree_data(self):
+        """Filter and group sessions, return lightweight data for tree assembly."""
+        filtered = self.sessions
+        if self.filter_text:
+            ft = self.filter_text.lower()
+            filtered = [
+                s for s in self.sessions
+                if ft in s["_search"]
+                or ft in self.session_names.get(s["session_id"], "").lower()
+            ]
+        groups = group_sessions(filtered, self.sort_mode)
+        # Pre-compute label parts as plain data
+        prepared = []
+        for _, cwd, items in groups:
+            item_data = []
+            for s in items:
+                item_data.append({
+                    "session": s,
+                    "age": human_age(s["age"]),
+                    "size": human_size(s["size"]),
+                    "name": self.session_names.get(s["session_id"], ""),
+                    "selected": s["session_id"] in self.selected_ids,
+                })
+            prepared.append((cwd, item_data))
+        return prepared
+
+    def _assemble_tree(self, prepared):
+        """Build tree nodes from pre-computed data (runs on main thread)."""
         tree = self.query_one("#session-tree", Tree)
         tree.clear()
 
-        # Pull colors from the active theme
         theme = self.current_theme
         accent = theme.accent if theme else "#fabd2f"
         primary = theme.primary if theme else "#85A598"
         secondary = theme.secondary if theme else "#A89A85"
         success = theme.success if theme else "#b8bb26"
 
-        filtered = self.sessions
-        if self.filter_text:
-            ft = self.filter_text.lower()
-            filtered = [
-                s for s in self.sessions
-                if ft in s["first_msg"].lower()
-                or ft in s["cwd_short"].lower()
-                or ft in s["session_id"].lower()
-                or ft in self.session_names.get(s["session_id"], "").lower()
-            ]
-
-        groups = group_sessions(filtered, self.sort_mode)
-
-        for _, cwd, items in groups:
+        for cwd, items in prepared:
             cwd_condensed = condense_path(cwd)
-            cwd_short = cwd.replace(HOME, "~")
-
-            # Directory label with folder icon, using theme colors
             dir_text = Text()
             dir_text.append(f"{ICON_FOLDER} ", style=f"bold {accent}")
             dir_text.append(f"{cwd_condensed} ", style=f"bold {primary}")
             dir_text.append(f"({len(items)})", style="dim")
             dir_node = tree.root.add(dir_text, expand=False)
-            dir_node.data = None  # directory nodes have no session data
+            dir_node.data = None
 
-            for s in items:
-                age = human_age(s["age"])
-                size = human_size(s["size"])
-                name = self.session_names.get(s["session_id"], "")
-
+            for item in items:
+                s = item["session"]
                 label = Text()
-                if s["session_id"] in self.selected_ids:
+                if item["selected"]:
                     label.append(f"{ICON_CHECK} ", style=f"bold {success}")
-                label.append(f"{ICON_CLOCK} {age:>7} ", style=f"{accent}")
-                label.append(f"{ICON_SIZE} {size:>7}", style="dim")
+                label.append(f"{ICON_CLOCK} {item['age']:>7} ", style=f"{accent}")
+                label.append(f"{ICON_SIZE} {item['size']:>7}", style="dim")
                 label.append("  ", style="")
-                if name:
-                    label.append(f"[{name}] ", style=f"bold {secondary}")
-                label.append(s["first_msg"])
+                if item["name"]:
+                    label.append(f"[{item['name']}] ", style=f"bold {secondary}")
+                label.append(s["last_msg"])
 
                 leaf = dir_node.add_leaf(label)
                 leaf.data = s
+
+    def _do_rebuild_tree(self):
+        """Synchronous rebuild for non-search cases (no filter, fast path)."""
+        prepared = self._prepare_tree_data()
+        self._assemble_tree(prepared)
 
     def _update_status(self):
         total = len(self.sessions)
@@ -601,7 +703,22 @@ class SessionBrowser(App):
         size = human_size(session["size"])
         name_line = f"\n**Name:** {name}" if name else ""
 
-        msg = prepare_markdown(session.get("first_msg_raw", ""))
+        first_raw = prepare_markdown(session.get("first_msg_raw", ""))
+        last_msgs_raw = session.get("last_msgs_raw", [])
+
+        # Build the message section: first message, then truncation + last messages
+        msg_parts = [first_raw]
+
+        # Show last messages if they differ from the first
+        if last_msgs_raw:
+            last_preview = [prepare_markdown(m) for m in last_msgs_raw]
+            # Check if the last messages are different from the first
+            if last_preview != [first_raw] and last_preview != [first_raw][:len(last_preview)]:
+                msg_parts.append("\n\n---\n\n*... (earlier messages omitted)*\n")
+                for m in last_preview:
+                    msg_parts.append(m)
+
+        msg = "\n\n".join(msg_parts)
 
         md = f"""**Session:** {sid}{name_line}
 **Directory:** {session['cwd_short']}
@@ -654,6 +771,14 @@ class SessionBrowser(App):
 
     def on_key(self, event):
         """Handle vi keys and left/right arrows for tree navigation."""
+        # Down arrow from search input jumps to the tree
+        focused = self.focused
+        if focused and getattr(focused, "id", None) == "search-input":
+            if event.key == "down":
+                self.query_one("#session-tree", Tree).focus()
+                event.prevent_default()
+            return
+
         tree = self.query_one("#session-tree", Tree)
         node = tree.cursor_node
         if node is None:
@@ -714,13 +839,21 @@ class SessionBrowser(App):
     def on_input_changed(self, event: Input.Changed):
         if event.input.id == "search-input":
             self.filter_text = event.value
-            self._rebuild_tree()
-            self._update_status()
+            if hasattr(self, "_search_timer") and self._search_timer is not None:
+                self._search_timer.stop()
+            self.query_one("#status-bar", Static).update("Searching...")
+            self._search_timer = self.set_timer(0.1, self._finish_search)
+
+    def _finish_search(self):
+        self._search_timer = None
+        self._rebuild_tree()
+        self._update_status()
 
     def on_input_submitted(self, event: Input.Submitted):
         if event.input.id == "search-input":
             self.query_one("#search-bar").styles.display = "none"
             self.query_one("#session-tree", Tree).focus()
+
 
     def action_expand_all(self):
         tree = self.query_one("#session-tree", Tree)
