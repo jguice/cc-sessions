@@ -9,9 +9,9 @@ Claude Code scatters session history across every project directory you've ever 
 
 ## Features
 
-- **Unified view**: All sessions grouped by project directory, across your whole machine
+- **Unified view**: All sessions grouped by project directory, across your whole machine, each showing its latest message
 - **Resume from anywhere**: Pick a session and `cd` into its working dir + resume automatically
-- **Preview pane**: See the first user message, session size, and metadata before resuming
+- **Preview pane**: See the first and most recent user messages, session size, and metadata before resuming
 - **Search / filter**: Find sessions by message content, directory, or custom name
 - **Rename, archive, delete**: Tidy up old sessions (individually or in bulk)
 - **Vi keybindings**: `h/j/k/l`, `g/G`, `ctrl-u/d`
@@ -22,7 +22,7 @@ Claude Code scatters session history across every project directory you've ever 
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.9+
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and in your `PATH`
 - Supported shells: fish, bash, or zsh
 
@@ -76,7 +76,7 @@ Run `cc-sessions` from any terminal. You'll get a tree view of every Claude Code
 | `Shift+E` | Collapse all groups |
 | `h/j/k/l` | Vi navigation |
 | `g` / `G` | Jump to top / bottom |
-| `Ctrl-U/D` | Page up / down |
+| `Ctrl-U/D` (or `Ctrl-B/F`) | Page up / down |
 | `Ctrl-P` | Command palette |
 | `q` / `Esc` | Quit |
 
