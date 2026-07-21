@@ -660,6 +660,7 @@ class SessionBrowser(App):
             dir_text.append(f"({len(items)})", style="dim")
             dir_node = tree.root.add(dir_text, expand=False)
             dir_node.data = None
+            dir_node._cwd_key = cwd
 
             for item in items:
                 s = item["session"]
@@ -675,6 +676,29 @@ class SessionBrowser(App):
 
                 leaf = dir_node.add_leaf(label)
                 leaf.data = s
+
+        pending = getattr(self, "_pending_view_state", None)
+        if pending is not None:
+            self._pending_view_state = None
+            expanded_cwds, target_session_id = pending
+            for dir_node in tree.root.children:
+                if getattr(dir_node, "_cwd_key", None) in expanded_cwds:
+                    dir_node.expand()
+            if target_session_id:
+                for dir_node in tree.root.children:
+                    if not dir_node.is_expanded:
+                        continue
+                    for leaf in dir_node.children:
+                        if leaf.data and leaf.data["session_id"] == target_session_id:
+                            self.call_after_refresh(self._select_leaf_after_refresh, leaf)
+                            return
+
+    def _select_leaf_after_refresh(self, leaf):
+        tree = self.query_one("#session-tree", Tree)
+        self._suppress_selection_exit = True
+        tree.select_node(leaf)
+        if leaf.data:
+            self._update_preview(leaf.data)
 
     def _do_rebuild_tree(self):
         """Synchronous rebuild for non-search cases (no filter, fast path)."""
@@ -734,6 +758,9 @@ class SessionBrowser(App):
 
     def on_tree_node_selected(self, event: Tree.NodeSelected):
         """When Enter is pressed on a tree node."""
+        if getattr(self, "_suppress_selection_exit", False):
+            self._suppress_selection_exit = False
+            return
         node = event.node
         if node.data is None:
             # Directory node: toggle expand/collapse
@@ -993,8 +1020,56 @@ class SessionBrowser(App):
         self._update_status()
         self._update_preview(None)
 
+    def _snapshot_expanded_cwds(self) -> set:
+        tree = self.query_one("#session-tree", Tree)
+        return {
+            getattr(n, "_cwd_key", None)
+            for n in tree.root.children
+            if n.is_expanded and getattr(n, "_cwd_key", None) is not None
+        }
+
+    def _next_session_after_removal(self, target_ids: set) -> Optional[str]:
+        """Pick the session_id to select after removing target_ids.
+
+        Stays within the cursor's folder: prefer the session below, fall back
+        to the one above. Returns None if the cursor isn't on a session or
+        the folder has no surviving sessions."""
+        tree = self.query_one("#session-tree", Tree)
+        cursor = tree.cursor_node
+        if not cursor or not cursor.data:
+            return None
+        cursor_id = cursor.data["session_id"]
+        cursor_cwd = cursor.data["cwd"]
+
+        same_folder = [s for s in self.sessions if s["cwd"] == cursor_cwd]
+        if self.sort_mode == "size":
+            same_folder.sort(key=lambda x: -x["size"])
+        else:
+            same_folder.sort(key=lambda x: -x["mtime"])
+        ordered = [s["session_id"] for s in same_folder]
+
+        if cursor_id in ordered and cursor_id not in target_ids:
+            return cursor_id
+        if cursor_id not in ordered:
+            return None
+        start_idx = ordered.index(cursor_id)
+        for i in range(start_idx + 1, len(ordered)):
+            if ordered[i] not in target_ids:
+                return ordered[i]
+        for i in range(start_idx - 1, -1, -1):
+            if ordered[i] not in target_ids:
+                return ordered[i]
+        return None
+
     def _do_archive(self, targets: List[dict]):
         os.makedirs(ARCHIVE_DIR, exist_ok=True)
+
+        target_ids = {s["session_id"] for s in targets}
+        self._pending_view_state = (
+            self._snapshot_expanded_cwds(),
+            self._next_session_after_removal(target_ids),
+        )
+
         for s in targets:
             try:
                 dest = os.path.join(ARCHIVE_DIR, os.path.basename(s["path"]))
@@ -1006,9 +1081,9 @@ class SessionBrowser(App):
                 pass
             self.selected_ids.discard(s["session_id"])
         self.sessions = [s for s in self.sessions if s not in targets]
+        self._update_preview(None)
         self._rebuild_tree()
         self._update_status()
-        self._update_preview(None)
 
     def _do_rename(self, session_id: str, name: str):
         if not name:
