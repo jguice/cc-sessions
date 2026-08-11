@@ -19,12 +19,19 @@ never reads it. Three record types matter:
 ```
 
 **These records are always near the end of the file.** `ai-title` is rewritten repeatedly
-as a session progresses, roughly every 20 lines. Measured across all 1,391 sessions, the
-worst-case distance from EOF back to the earliest of the three is **31,365 bytes**, and
-**zero sessions exceed 128 KB** — a 4.2x margin.
+as a session progresses, median gap 22 lines. Measured across all 1,391 sessions, the
+worst-case distance from EOF back to the earliest of the three is **31,365 bytes**, or 24%
+of the window, across **zero misses in 1,391 sessions**.
+
+The bound is empirical, not structural. 100 files contain single JSONL lines larger than
+128 KB (largest 16.4 MB), and because the seek lands mid-line the usable window shrinks by
+the torn prefix: one file has a 112,927-byte prefix leaving 18,145 usable against a record
+at 17,956, a true margin of 189 bytes. Nothing misses today, but do not treat "4x headroom"
+as the safety story.
 
 A **128 KB tail read therefore recovers all three identically to a full-file scan, with
-zero misses and zero mismatches**, in **0.15s for the whole corpus**. `_read_tail_lines`
+zero misses and zero mismatches**, in **0.26s for the whole corpus** (0.20s at the old
+30-line cap). `_read_tail_lines`
 already reads a 128 KB tail (`cc-sessions-tui:231-246`), so extraction needs no cache and
 no full-file scan.
 
@@ -40,13 +47,14 @@ Coverage across 1,391 sessions, by recency bucket:
 | 101-300 | 84% | 100% |
 | 301-600 | 75% | 100% |
 | 601+ | 43% | 99.7% |
-| **All** | **58%** | **99.9%** |
+| **All** | **58%** | **99.3%** |
 
 The gap is feature age and improves on its own. Treat these as shape, not exact digits:
 resuming a session rewrites its mtime and reshuffles the buckets, so an independent
 recount lands within a few points either way. `ai_title` length is median 45 chars, max
-71, so it fits a row. Compaction summaries (`isCompactSummary`) exist in 25 files and are
-not used.
+71, so it fits a row. The `last-prompt` figure counts records that actually carry the
+`lastPrompt` field, which is what extraction requires; 99.86% have a record at all.
+Compaction summaries (`isCompactSummary`) exist in 24 files and are not used.
 
 Corpus composition matters for reading any of these numbers: **786 of 1,391 sessions are
 under 10 lines**, single-turn automated runs. They dominate any whole-corpus median.
@@ -82,7 +90,6 @@ it. This is expected, not an extraction error; do not add a guard.
 | `custom_title` | last `custom-title` record |
 | `last_prompt` | last `last-prompt` record **that has a `lastPrompt` field** |
 | `last_assistant` | last non-`<synthetic>` assistant `text` block, **only if it follows the last user message in file order** |
-| `git_branch` | `gitBranch` on the last user/assistant/system record |
 | `files_edited` | union of `tool_use` Edit/Write/NotebookEdit `file_path` and `file-history-delta.trackingPath`, **normalized to absolute against `cwd` first** |
 
 Four extraction details are not optional:
@@ -112,35 +119,47 @@ separately across all 1,391 sessions:
 | Outcome | Share |
 |---|---|
 | Assistant text present and follows the last user message | **87.3%** |
-| No non-synthetic assistant text in the tail window | **11.6%** |
+| No non-synthetic assistant text in the tail window | **11.4%** |
 | Assistant text present but predates the last user message | **1.2%** |
 
-So `Where I left off` shows the prompt plus the reply 87% of the time and **degrades to
-prompt-only for the other 13%**, which is acceptable because `last_prompt` alone is a real
-answer at 99.9% coverage. `git_branch` was measured too and is present in the tail for
-**100%** of sessions.
+**Which user records count is load-bearing and must be stated.** The figures above hold
+only when "last user message" excludes `isMeta` records and tool_result carriers. Reusing
+`_extract_user_text` (`:139-141`) as-is does not filter `isMeta`, and lands at 74.9% /
+11.4% / **13.6%**; an 11x worse degradation rate. The 195 predates-cases are 172 `isMeta`
+hook injections, 7 tool_result carriers, 11 `[Request interrupted by user]` blocks, and 5
+`<local-command-stdout>` strings from `/compact`.
+
+Under the stated filter, `Where I left off` shows prompt plus reply 87% of the time and
+**degrades to prompt-only for the other 13%**, which is acceptable because `last_prompt`
+alone is a real answer at 99.3% coverage.
+
+**`git_branch` is deliberately not extracted.** It rides on ordinary conversation records
+rather than being appended at EOF, so its last occurrence sits up to **125,982 bytes from
+EOF, 96.1% of the window**, versus 24% for the title records. It was the only field in the
+design with no headroom, and it is decorative. Dropping it makes the tail bound depend
+solely on records Claude Code appends at the end of the file.
 
 ### Fields retained, changed, and retired
 
 The backwards walk at `:183-201` is **kept** (it parses lines already in the window at
 near-zero cost) but its output narrows:
 
-- `last_msg` — **kept**, feeds `_search` and the precedence-5 row fallback.
-- `last_msgs_raw` — **retired.** Its only consumer is `_update_preview` (`:731-745`), and
+- `last_msg`; **kept**, feeds `_search` and the precedence-6 row fallback.
+- `last_msgs_raw`; **retired.** Its only consumer is `_update_preview` (`:731-745`), and
   `Where I left off` supersedes it. `TAIL_CHAR_BUDGET` goes with it.
-- `first_msg`, `first_msg_raw`, `cwd`, `size`, `mtime` — unchanged.
+- `first_msg`, `first_msg_raw`, `cwd`, `size`, `mtime`; unchanged.
 
 The head-50 read for `cwd` and `first_msg` is unchanged, as is the `if cwd:` rule at `:208`
 that skips sessions with no `cwd` (currently 0 sessions).
 
-**No cache.** At 0.15s for the full corpus there is nothing to cache. This removes the
+**No cache.** At 0.26s for the full corpus there is nothing to cache. This removes the
 cache file, its invalidation rule, corruption fallback, pruning policy, concurrency
 hazard, and the 205 MB-file problem in one stroke.
 
 ### `files_edited` is a minor section
 
 Only **7%** of sessions show any file edit in the tail window (median 2 paths when
-non-empty, max 14). `file-history-delta` alone is insufficient: it tracks the working
+non-empty, max 7). `file-history-delta` alone is insufficient: it tracks the working
 directory and is blind to everything outside it. Of 110 recent edit-bearing sessions, 63
 have no delta record, and only 3 of those 63 edited anything inside their own `cwd`. The
 `tool_use` source is broader; delta adds little once normalized, but the union is free.
@@ -154,25 +173,35 @@ A single `clean_label()` applied to everything would mangle the summary body: co
 newlines flattens prose, a title-sized cap decapitates it, and stripping `<...>` eats
 `<Component>`, generics, and shell redirects in text about code.
 
-- **`clean_label(s, max_len=200)`** — for row-label and heading sources (`ai_title`,
+- **`clean_label(s, max_len=200)`**; for row-label and heading sources (`ai_title`,
   `custom_title`, `last_prompt`, `last_msg`, summary title). Strips `<...>` tags (matching
   `_extract_user_text` at `:139-141`; `last_prompt` currently bypasses this and real values
   contain raw XML and embedded JSON), collapses newlines and control characters to spaces,
   strips surrounding double quotes (2 of 36 `custom_title` values carry literal quotes),
   collapses whitespace runs, truncates to `max_len`.
-- **`clean_body(s, max_len=2000)`** — for the summary body and `last_assistant`. Strips
+- **`clean_body(s, max_len=2000)`**; for the summary body and `last_assistant`. Strips
   control characters, preserves newlines, demotes leading `#` runs to bold so injected
   model text cannot open a heading that sits as a peer of the preview's own sections,
-  truncates to `max_len`.
+  truncates to `max_len`, then **balances code fences**: if the result contains an odd
+  number of ``` markers, append a closing one. Without this a cut landing inside a fence
+  leaves it open and swallows every section below it into a code block.
 
-`last_prompt` is already `…`-truncated by Claude Code; treat it as possibly-truncated.
-`first_msg_raw` passes through `clean_body()` for the same heading-injection reason.
+**`max_len` is per call site, not per field.** `last_prompt` is capped at 200 for the row
+and 2,000 for the preview blockquote, which is the pane's headline content and should not
+lose text to a row-sized cap. Max observed `last_prompt` is 201 characters, so this is
+cheap insurance rather than a live problem.
+
+`first_msg_raw` and `last_assistant` pass through `clean_body()` for the heading-injection
+reason, then through `prepare_markdown()` (`:308-313`), in that order. `prepare_markdown`
+emits fenced blocks, so running it before truncation would reintroduce the unbalanced-fence
+bug. Keeping it means tables still render in `Started with` and now also in the assistant
+reply, the likelier place to contain one; `render_table()` (`:276-306`) stays.
 
 ### Row label
 
 **Single line.** Textual's `Tree.process_label` (`_tree.py:846`) does
-`text_label.split()[0]` and silently discards everything after a newline, and node height
-is fixed at one strip in `_render_line` (`_tree.py:1302`). A two-line row is not renderable
+`text_label.split()[0]` at `:861` and silently discards everything after a newline, and node height
+is fixed at one strip in `_render_line` (`_tree.py:1313`). A two-line row is not renderable
 without subclassing the widget.
 
 ```
@@ -197,7 +226,7 @@ does not have, plus an `on_resize` handler that does not exist anywhere in the f
 the bracket form disappears.
 
 **Byte size stays in the row.** Dropping it would leave the `size` sort mode (`:45`,
-palette at `:395`, `group_sessions` at `:260`, `_next_session_after_removal` at `:1046`)
+palette at `:392`, `group_sessions` at `:260`, `_next_session_after_removal` at `:1031`)
 sorting on a quantity nothing on screen shows. Keeping it costs 7 characters.
 
 ### Label precedence
@@ -207,7 +236,12 @@ sorting on a quantity nothing on screen shows. Keeping it costs 7 characters.
 3. Saved summary title, **if** `ai_title` is unchanged since the summary was generated
 4. `ai_title`
 5. `last_prompt`
-6. `session_id[:12]` (terminal fallback, so an empty session never renders a blank row)
+6. `last_msg` (the tail-derived last user message)
+7. `session_id[:12]` (terminal fallback, so an empty session never renders a blank row)
+
+Level 6 exists because `last_prompt` carries a usable `lastPrompt` field on 99.3% of
+sessions, so roughly ten sessions in the corpus would otherwise render as a hex id while a
+perfectly good last user message sits already extracted.
 
 Level 3 implements the user's rule. A flat "ai_title always beats summary" list would make
 the feature dead on arrival: 74-84% of recent sessions already have an `ai_title`, so
@@ -232,7 +266,7 @@ replaced by a machine one on next resume.
 ### Search
 
 `_search` (`:226`, filtered at `:625`) currently indexes `first_msg + last_msg + cwd_short
-+ session_id`. It gains `ai_title`, `custom_title`, and `last_prompt` — all static for the
++ session_id`. It gains `ai_title`, `custom_title`, and `last_prompt`; all static for the
 lifetime of a load, so they are safe to prebuild.
 
 **Local names and summaries stay in the live filter expression** alongside the existing
@@ -246,7 +280,7 @@ Keeping them live costs one substring check per row and needs no invalidation.
 Measured: 61 session ids have `/rename` in `history.jsonl`; 22 point at sessions still on
 disk, and **all 22 carry a `custom-title` record inside the 128 KB tail**. Zero live
 sessions need the history path. `load_claude_renames()` (`:85-111`), `HISTORY_FILE`
-(`:42`), and the merge in `load_session_names()` (`:113-124`) are deleted. Nothing in
+(`:43`), and the merge in `load_session_names()` (`:113-124`) are deleted. Nothing in
 `install.sh`, `cc-sessions.sh`, or `cc-sessions.fish` references them.
 
 `README.md:92` currently reads: *"Session names set via Claude's `/rename` command are
@@ -273,14 +307,14 @@ that title into `session-names.json`.
 
 ### Preview pane
 
-`#preview` is a `Markdown` widget (`:555-558`), so content must be real markup;
+`#preview` is a `Markdown` widget (`:545`), so content must be real markup;
 consecutive plain lines would otherwise join into one paragraph. `prepare_markdown()`
 (`:308-313`) only rewrites tables and fixes none of this.
 
 ```markdown
 ## Fix flaky auth token refresh test
 
-`~/code/acme-api` · `main` · 42KB
+`~/code/acme-api` · 42KB
 
 ### Summary
 *Generated 2026-08-11 · "Auth token refresh race condition"*
@@ -301,8 +335,7 @@ the token refresh test fails about one run in twenty
 ```
 
 The heading is the resolved precedence label. Sections with no data are omitted, and the
-` · ` metadata line joins conditionally, since `git_branch` is inline rather than a section
-and is absent on some older sessions. File paths render relative to `cwd` when they fall
+` · ` metadata line joins conditionally. File paths render relative to `cwd` when they fall
 under it, absolute otherwise, capped at 10 with a `+N more` line.
 
 The `Summary` block renders whenever a saved summary exists, **including its own title**,
@@ -354,8 +387,9 @@ rebuilds the whole tree, so a per-row pending state would collapse folders mid-o
 session_id)` *before* rebuilding, reusing the existing mechanism (`:1023`, consumed at
 `:679-695`). The row label changes precisely when the summary wins precedence 3, which is
 the happy path, so without this the reward for generating a summary is every folder
-collapsing and the cursor jumping to the top. Also refresh the preview in place if the
-cursor is still on that session, and **notify with the resulting title** so a regeneration
+collapsing and the cursor jumping to the top. `_select_leaf_after_refresh` (`:696-701`) already calls `_update_preview`
+when it restores the cursor, so no separate preview refresh is needed on that branch.
+**Notify with the resulting title** so a regeneration
 that produced the same text is visibly distinguishable from a no-op.
 
 ### Input construction
@@ -389,13 +423,17 @@ needed, since `session_mtime` alone cannot distinguish "the user added a turn" f
 "Claude wrote a new title".
 
 Loaded in `_load_sessions_async` (`:559-562`) alongside `load_sessions()` and passed into
-`_finish_loading` (`:564-573`), which stores it as `self.summaries`. `_prepare_tree_data`
+`_finish_loading` (`:564-573`), which stores it as `self.summaries`. **`self.summaries` and the in-flight session-id set are
+both initialized in `__init__` (`:524-534`)**, matching `self.session_names` today:
+`watch_theme` (`:575-582`) calls `_rebuild_tree()` and can fire from the command palette
+before `_finish_loading` runs, which would otherwise hit `_prepare_tree_data` with the
+attribute undefined. `_prepare_tree_data`
 (`:618-642`) reads it when resolving the label, so its per-item dict gains a `label` key
 rather than the current `name` key.
 
 Writes re-read the file and merge by key before writing, then `os.replace` from a temp
 file. Two open TUIs would otherwise silently discard a summary the user paid for. The
-existing `_save_prefs` (`:588-593`) already re-reads before writing; this follows it.
+existing `_save_prefs` (`:593`) already re-reads before writing; this follows it.
 
 `_do_delete` (`:1007-1021`) drops the session's `summaries.json` **and**
 `session-names.json` entries alongside `os.remove`. `_do_archive` (`:1064-1086`) keeps
@@ -404,8 +442,8 @@ both, since archived sessions can be restored.
 ## Out of scope
 
 - Bulk or background summarization. On-demand only, by design.
-- Special handling for automated sessions. Measured: **0 sessions** have a `last_prompt`
-  over 2,000 characters, because Claude Code truncates the stored value.
+- Special handling for automated sessions. Measured: **max observed `last_prompt` is 201
+  characters**, because Claude Code truncates the stored value hard.
 - Ack-shaped last prompts ("ok", "do it"). Only 7 of 1,391 sessions have a `last_prompt`
   of 15 characters or fewer, and 33 have 40 or fewer.
 - Compaction summaries as a data source.
@@ -434,7 +472,10 @@ The repo has no tests, no framework, and no CI, and the module has no `.py` exte
 Renaming it would touch `install.sh` and both shell wrappers, which is churn this change
 should not carry. Instead: one `tests/test_extract.py` loading the module via
 `importlib.util.spec_from_file_location`, plus a `requirements-dev.txt` declaring pytest
-and a line in the README's Contributing section. Loading the module executes its top-level
+and a line in the README's Contributing section giving the explicit command
+(`~/.local/share/cc-sessions-venv/bin/pip install -r requirements-dev.txt`), since
+`install.sh:17` hardcodes `pip install -q textual` and there is no runtime
+`requirements.txt`. Loading the module executes its top-level
 `textual` and `rich` imports, so tests run inside the existing venv.
 
 Two test groups, covering the two things that will actually be wrong:
