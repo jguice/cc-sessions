@@ -52,6 +52,8 @@ SUMMARY_TIMEOUT = 90
 
 SORT_MODES = ["recency", "size", "name"]
 
+SPINNER_FRAMES = "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f"
+
 # Nerd Font icons
 ICON_FOLDER = "\uf07b"       #
 ICON_SESSION = "\uf120"      #
@@ -752,7 +754,9 @@ class SessionBrowser(App):
         self.sessions = []
         self.session_names = {}
         self.summaries = load_summaries()
-        self._summarizing = set()
+        self._summarizing = {}
+        self._spin_timer = None
+        self._spin = 0
         self.sort_mode = "recency"
         self.selected_ids: Set[str] = set()
         self.filter_text = ""
@@ -944,6 +948,22 @@ class SessionBrowser(App):
             parts.append(f"{selected} selected")
         if self.filter_text:
             parts.append(f"Filter: {self.filter_text}")
+        if self._summarizing:
+            self._render_spinner_status(parts)
+            return
+        self.query_one("#status-bar", Static).update(" | ".join(parts))
+
+    def _render_spinner_status(self, parts=None):
+        """Status line while one or more summaries are running."""
+        if parts is None:
+            parts = [f"{ICON_SESSION} {len(self.sessions)} sessions"]
+        frame = SPINNER_FRAMES[self._spin % len(SPINNER_FRAMES)]
+        now = time.time()
+        jobs = [
+            f"{sid[:8]} {int(now - started)}s"
+            for sid, started in sorted(self._summarizing.items(), key=lambda kv: kv[1])
+        ]
+        parts.append(f"{frame} Summarizing {', '.join(jobs)} (Haiku, usually 5-25s)")
         self.query_one("#status-bar", Static).update(" | ".join(parts))
 
     def _update_preview(self, session: Optional[dict]):
@@ -1257,9 +1277,55 @@ class SessionBrowser(App):
         if sid in self._summarizing:
             self.notify("Already summarizing this session")
             return
-        self._summarizing.add(sid)
-        self.query_one("#status-bar", Static).update(f"Summarizing {sid[:8]}...")
+        self._summarizing[sid] = time.time()
+        if self._spin_timer is None:
+            self._spin_timer = self.set_interval(0.1, self._tick_spinner)
+        self._tick_spinner()
         self._summarize_async(s)
+
+    def _tick_spinner(self):
+        """Animate the status line and the affected rows without rebuilding the tree."""
+        self._spin += 1
+        if not self._summarizing:
+            return
+        self._render_spinner_status()
+        frame = SPINNER_FRAMES[self._spin % len(SPINNER_FRAMES)]
+        try:
+            tree = self.query_one("#session-tree", Tree)
+        except Exception:
+            return
+        for dir_node in tree.root.children:
+            for leaf in dir_node.children:
+                if not leaf.data or leaf.data["session_id"] not in self._summarizing:
+                    continue
+                base = getattr(leaf, "_base_label", None)
+                if base is None:
+                    base = leaf.label.copy()
+                    leaf._base_label = base
+                elapsed = int(time.time() - self._summarizing[leaf.data["session_id"]])
+                spun = Text()
+                spun.append(f"{frame} {elapsed}s ", style="bold")
+                spun.append_text(base)
+                # set_label repaints one node; a full rebuild would collapse folders
+                leaf.set_label(spun)
+
+    def _clear_spinner(self, session_id: str):
+        self._summarizing.pop(session_id, None)
+        try:
+            tree = self.query_one("#session-tree", Tree)
+        except Exception:
+            tree = None
+        if tree is not None:
+            for dir_node in tree.root.children:
+                for leaf in dir_node.children:
+                    if leaf.data and leaf.data["session_id"] == session_id:
+                        base = getattr(leaf, "_base_label", None)
+                        if base is not None:
+                            leaf.set_label(base)
+                            leaf._base_label = None
+        if not self._summarizing and self._spin_timer is not None:
+            self._spin_timer.stop()
+            self._spin_timer = None
 
     @work(thread=True)
     def _summarize_async(self, session: dict):
@@ -1268,7 +1334,7 @@ class SessionBrowser(App):
 
     def _finish_summary(self, session: dict, result):
         sid = session["session_id"]
-        self._summarizing.discard(sid)
+        self._clear_spinner(sid)
         if not result:
             self._update_status()
             self.notify("Summary failed; previous summary kept", severity="warning")
