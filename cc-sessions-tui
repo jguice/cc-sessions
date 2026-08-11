@@ -1070,12 +1070,13 @@ class SessionBrowser(App):
         entry = self.summaries.get(sid) or {}
         if entry.get("body"):
             when = time.strftime("%Y-%m-%d", time.localtime(entry.get("generated_at", 0)))
-            head = f"*Generated {when}"
-            if entry.get("title"):
-                head += f' · "{entry["title"]}"'
+            bits = [f"Generated {when}"]
+            # Only worth restating when the summary's title is not the heading above
+            if entry.get("title") and entry["title"] != label:
+                bits.append(f'titled "{entry["title"]}"')
             if entry.get("session_mtime", 0) < session["mtime"]:
-                head += " · session has changed since"
-            parts += ["### Summary", head + "*", entry["body"]]
+                bits.append("session has changed since")
+            parts += ["### Summary", "*" + " · ".join(bits) + "*", entry["body"]]
 
         if session.get("first_msg_raw"):
             parts += ["### Started with",
