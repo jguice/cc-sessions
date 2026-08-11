@@ -84,6 +84,18 @@ Run `cc-sessions` from any terminal. You'll get a tree view of every Claude Code
 | `Ctrl-P` | Command palette |
 | `q` / `Esc` | Quit |
 
+## Demo mode
+
+```bash
+cc-sessions --demo
+```
+
+Runs against a throwaway set of fictional sessions in a temp directory instead of `~/.claude/projects`, so you can record or present the tool without showing your own work. The header reads **DEMO DATA**.
+
+Nothing is mocked. Demo mode only repoints the paths, so search, sort, rename, archive, delete, the preview and `c` all run their real code paths against real (fake) session files. Archive and delete only touch the temp copies, and demo renames and summaries go to a temp config dir rather than your own. `Enter` reports the session it would resume instead of resuming, since the directories are fictional.
+
+The fixture covers every label source, folder grouping, a session with a saved summary, sessions with no title, and a range of sizes and ages.
+
 ## Config
 
 Preferences live in `~/.config/cc-sessions/`:

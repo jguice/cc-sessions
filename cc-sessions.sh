@@ -5,7 +5,7 @@
 cc-sessions() {
     local venv_dir="$HOME/.local/share/cc-sessions-venv"
     local output
-    output=$("$venv_dir/bin/python3" "$HOME/.local/bin/cc-sessions-tui")
+    output=$("$venv_dir/bin/python3" "$HOME/.local/bin/cc-sessions-tui" "$@")
 
     # Output format: RESUME\tcwd\tsession_id\tskip_perms
     if [ -n "$output" ]; then

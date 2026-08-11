@@ -7,6 +7,7 @@ import re
 import shutil
 import glob
 import subprocess
+import tempfile
 import time
 import sys
 from functools import partial
@@ -51,6 +52,8 @@ BODY_MAX = 2000
 SUMMARY_TIMEOUT = 90
 
 SORT_MODES = ["recency", "size", "name"]
+
+DEMO = False
 
 SPINNER_FRAMES = "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f"
 
@@ -553,6 +556,210 @@ def generate_summary(session: dict):
     return {"title": title, "body": body}
 
 
+
+# ---------------------------------------------------------------------------
+# Demo mode
+# ---------------------------------------------------------------------------
+# Writes a throwaway ~/.claude/projects lookalike and repoints every path at it,
+# so the whole app runs its real code path against fake data. Nothing is mocked:
+# search, sort, preview, rename, archive, delete and c (summarize) all behave
+# exactly as they do against real sessions.
+
+DEMO_ROOT = os.path.join(tempfile.gettempdir(), "cc-sessions-demo")
+
+DEMO_SESSIONS = [
+    {
+        "cwd": "~/code/acme-api", "age_h": 2, "pad": 40,
+        "ai_title": "Fix flaky auth token refresh test",
+        "turns": [
+            ("user", "The auth refresh test fails maybe one run in five on CI but never locally. Can you figure out why?"),
+            ("assistant", "Reproduced it with the suite run 50 times under load. `TokenRefresher.refresh()` schedules a background renewal and returns immediately, so the test asserts on the old token whenever the renewal wins the race."),
+            ("user", "so it's a real race, not just a slow test?"),
+            ("assistant", "A real one. Production hits it too, just rarely: any request landing in that window gets the stale token and a 401. I added an `await refresher.settled()` barrier and made the test drive it explicitly."),
+            ("user", "good catch. does the fix cover the concurrent-callers case?"),
+            ("assistant", "Not yet. Two callers racing the first refresh still each trigger their own. Next step is collapsing them onto a single in-flight future."),
+        ],
+        "edits": ["src/auth/refresher.py", "tests/test_auth_refresh.py"],
+    },
+    {
+        "cwd": "~/code/acme-api", "age_h": 5, "pad": 900,
+        "ai_title": "Trace Postgres connection pool exhaustion",
+        "summary": {
+            "title": "Postgres pool exhaustion traced to unclosed cursors",
+            "body": "Tracked intermittent 500s under load to the reporting endpoint, which opened a server-side cursor per request and never closed it on the error path. Pool of 20 drained in about four minutes of sustained traffic. Fixed with a context manager and added a pool-saturation alert. Left off deciding whether to raise the pool size or add a queue in front of it.",
+        },
+        "turns": [
+            ("user", "We're getting 500s under load and the logs just say connection pool exhausted. Where do I start?"),
+            ("assistant", "Instrumented checkout and checkin. The reporting endpoint opens a server-side cursor per request and only closes it on the happy path, so every error leaks a connection. Twenty connections drain in roughly four minutes of sustained traffic."),
+            ("user", "that would explain why it only shows up after the morning spike"),
+            ("assistant", "Right. I wrapped the cursor in a context manager and added an alert at 80% pool saturation."),
+            ("user", "should we just bump the pool size too?"),
+            ("assistant", "It would mask the next leak rather than fix it. The real question is whether to raise the ceiling or put a queue in front so bursts wait instead of failing. Worth deciding before the next release."),
+        ],
+        "edits": ["src/reporting/queries.py", "src/db/pool.py", "ops/alerts.yaml"],
+    },
+    {
+        "cwd": "~/code/acme-api", "age_h": 26, "pad": 300,
+        "custom_title": "checkout-rewrite",
+        "turns": [
+            ("user", "Let's plan the checkout rewrite. I want to move off the monolithic handler without a big-bang cutover."),
+            ("assistant", "Proposed a strangler approach: route a percentage of traffic to the new handler behind a flag, keep both writing to the same tables, and compare outputs in shadow mode before shifting real traffic."),
+            ("user", "what's the riskiest part of that?"),
+            ("assistant", "Divergence in tax and discount rounding. Shadow mode catches it only if we compare cent-for-cent rather than on the total. I'd log both breakdowns and diff them nightly."),
+        ],
+        "edits": ["docs/checkout-rewrite.md"],
+    },
+    {
+        "cwd": "~/code/acme-api", "age_h": 50, "pad": 6,
+        "turns": [
+            ("user", "can you look at the failing CI job on the release branch"),
+            ("assistant", "The job fails at the lint step: `ruff` picked up a new rule in 0.6 that flags the unused loop variable in `sync_orders`. Pinning ruff or renaming the variable both clear it."),
+        ],
+    },
+    {
+        "cwd": "~/code/weather-cli", "age_h": 8, "pad": 60,
+        "ai_title": "Add offline cache for forecast lookups",
+        "turns": [
+            ("user", "I want the CLI to work on a plane. Can we cache forecasts locally?"),
+            ("assistant", "Added a small on-disk cache keyed by station and hour, with a 6 hour freshness window. Offline runs serve the last good response and print how stale it is."),
+            ("user", "what happens if the cache is corrupt?"),
+            ("assistant", "It falls back to a live fetch and rewrites the entry. A corrupt cache degrades to today's behavior rather than failing."),
+        ],
+        "edits": ["weather/cache.py", "weather/cli.py"],
+    },
+    {
+        "cwd": "~/code/weather-cli", "age_h": 30, "pad": 15,
+        "ai_title": "Explain the station ID lookup fallback",
+        "turns": [
+            ("user", "why does 'weather london' pick the wrong london sometimes?"),
+            ("assistant", "The geocoder returns matches sorted by population, but ties are broken by insertion order, which is effectively arbitrary. London, Ontario occasionally wins. Sorting by distance from the last successful lookup fixes the common case."),
+        ],
+    },
+    {
+        "cwd": "~/infra/terraform-prod", "age_h": 15, "pad": 500,
+        "ai_title": "Audit IAM roles for unused permissions",
+        "turns": [
+            ("user", "Can you audit our IAM roles and tell me what's over-permissioned?"),
+            ("assistant", "Pulled 90 days of CloudTrail and compared granted actions against used ones. Fourteen roles have never used more than a third of what they're granted; three still carry `*` on S3."),
+            ("user", "which ones are actually risky vs just untidy?"),
+            ("assistant", "The three with S3 wildcards are risky because two are assumable by the CI role. The rest are untidy. I'd fix the wildcards this week and batch the others into a cleanup PR."),
+        ],
+        "edits": ["iam/roles.tf", "iam/policies.tf"],
+    },
+    {
+        "cwd": "~/infra/terraform-prod", "age_h": 72, "pad": 120,
+        "ai_title": "Debug Terraform state lock timeout",
+        "turns": [
+            ("user", "terraform plan keeps timing out acquiring the state lock"),
+            ("assistant", "A plan from an aborted CI run three days ago still holds the DynamoDB lock. Force-unlocking it clears the immediate problem; the underlying issue is that the job has no trap to release on cancel."),
+            ("user", "add the trap?"),
+            ("assistant", "Added it to the workflow so cancelled runs release the lock. Force-unlock is now a break-glass step rather than routine."),
+        ],
+        "edits": [".github/workflows/terraform.yml"],
+    },
+    {
+        "cwd": "~/code/data-pipeline", "age_h": 4, "pad": 200,
+        "ai_title": "Backfill missing events from the archive",
+        "local_name": "q3-backfill",
+        "turns": [
+            ("user", "We dropped about six hours of events during the outage. Can we backfill from the archive bucket?"),
+            ("assistant", "Yes. The archive has them, but the partition keys use event time and the loader assumes ingest time, so a naive replay would land them in the wrong partitions."),
+            ("user", "how do we avoid double-counting the ones that did make it through?"),
+            ("assistant", "Dedupe on the event id during the merge. I staged the replay to a temp table so you can diff counts per partition before promoting it."),
+        ],
+        "edits": ["pipeline/backfill.py", "pipeline/partitions.py"],
+    },
+    {
+        "cwd": "~/code/data-pipeline", "age_h": 96, "pad": 8,
+        "turns": [
+            ("user", "quick sanity check on the schema change, does adding a nullable column break the downstream readers"),
+            ("assistant", "Not for the Parquet readers, which resolve by name. The one CSV consumer reads by position and would shift, so it needs the column appended last or a pinned projection."),
+        ],
+    },
+]
+
+
+def _demo_line(obj):
+    return json.dumps(obj) + "\n"
+
+
+def _write_demo_session(spec, project_dir, session_id, cwd):
+    """Build a JSONL file with the same record shapes Claude Code writes."""
+    lines = []
+    base = {"sessionId": session_id, "cwd": cwd, "gitBranch": "main",
+            "version": "2.1.228", "userType": "external"}
+    last_turn = len(spec["turns"]) - 1
+    for turn_i, (role, text) in enumerate(spec["turns"]):
+        if role == "user":
+            lines.append(_demo_line(dict(base, type="user",
+                                         message={"role": "user", "content": text})))
+        else:
+            lines.append(_demo_line(dict(base, type="assistant",
+                                         message={"role": "assistant", "model": "claude-sonnet-5",
+                                                  "content": [{"type": "text", "text": text}]})))
+        # Padding stands in for the tool traffic that dominates a real session's size.
+        # None after the final turn, so the closing exchange stays inside the tail window.
+        for _ in range(0 if turn_i == last_turn else spec.get("pad", 0)):
+            lines.append(_demo_line(dict(base, type="user", message={"role": "user", "content": [
+                {"type": "tool_result", "content": "x" * 900}]})))
+    for path in spec.get("edits", []):
+        lines.append(_demo_line({"type": "file-history-delta", "trackingPath": path,
+                                 "timestamp": "2026-08-11T12:00:00Z"}))
+    if spec.get("ai_title"):
+        lines.append(_demo_line({"type": "ai-title", "aiTitle": spec["ai_title"],
+                                 "sessionId": session_id}))
+    if spec.get("custom_title"):
+        lines.append(_demo_line({"type": "custom-title", "customTitle": spec["custom_title"],
+                                 "sessionId": session_id}))
+    last_user = [t for r, t in spec["turns"] if r == "user"][-1]
+    lines.append(_demo_line({"type": "last-prompt", "lastPrompt": last_user,
+                             "leafUuid": session_id, "sessionId": session_id}))
+    path = os.path.join(project_dir, session_id + ".jsonl")
+    with open(path, "w") as f:
+        f.writelines(lines)
+    mtime = time.time() - spec["age_h"] * 3600
+    os.utime(path, (mtime, mtime))
+    return path
+
+
+def setup_demo():
+    """Populate a throwaway projects tree and repoint the app at it."""
+    global PROJECTS_BASE, ARCHIVE_DIR, CONFIG_DIR, NAMES_FILE, PREFS_FILE, SUMMARIES_FILE, DEMO
+    DEMO = True
+    shutil.rmtree(DEMO_ROOT, ignore_errors=True)
+    PROJECTS_BASE = os.path.join(DEMO_ROOT, "projects")
+    ARCHIVE_DIR = os.path.join(DEMO_ROOT, "archived-sessions")
+    CONFIG_DIR = os.path.join(DEMO_ROOT, "config")
+    NAMES_FILE = os.path.join(CONFIG_DIR, "session-names.json")
+    PREFS_FILE = os.path.join(CONFIG_DIR, "prefs.json")
+    SUMMARIES_FILE = os.path.join(CONFIG_DIR, "summaries.json")
+    os.makedirs(PROJECTS_BASE, exist_ok=True)
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+
+    names, summaries = {}, {}
+    for i, spec in enumerate(DEMO_SESSIONS):
+        cwd = os.path.expanduser(spec["cwd"])
+        project_dir = os.path.join(PROJECTS_BASE, cwd.replace("/", "-"))
+        os.makedirs(project_dir, exist_ok=True)
+        session_id = "demo%04d-1111-2222-3333-44445555%04d" % (i, i)
+        _write_demo_session(spec, project_dir, session_id, cwd)
+        if spec.get("local_name"):
+            names[session_id] = spec["local_name"]
+        if spec.get("summary"):
+            summaries[session_id] = dict(
+                spec["summary"],
+                generated_at=int(time.time() - 3600),
+                session_mtime=time.time() - spec["age_h"] * 3600,
+                ai_title_at_generation=spec.get("ai_title", ""),
+            )
+    with open(NAMES_FILE, "w") as f:
+        json.dump(names, f, indent=2)
+    with open(SUMMARIES_FILE, "w") as f:
+        json.dump(summaries, f, indent=2)
+    with open(PREFS_FILE, "w") as f:
+        json.dump({"theme": "gruvbox"}, f, indent=2)
+
+
 # ---------------------------------------------------------------------------
 # Confirmation dialog
 # ---------------------------------------------------------------------------
@@ -875,7 +1082,7 @@ class SessionBrowser(App):
         self._rebuild_tree()
         self._update_status()
         sort_label = "folder name" if self.sort_mode == "name" else self.sort_mode
-        self.sub_title = f"sorted by {sort_label}"
+        self.sub_title = ("DEMO DATA · " if DEMO else "") + f"sorted by {sort_label}"
         self.query_one("#session-tree", Tree).focus()
 
     def watch_theme(self, new_theme: str) -> None:
@@ -1119,6 +1326,9 @@ class SessionBrowser(App):
             node.toggle()
             return
         sid = node.data["session_id"]
+        if DEMO:
+            self.notify(f"Demo: would resume {node.data['cwd_short']}")
+            return
         if self._mouse_input and self._armed_id != sid:
             # First click on a row: show it, don't resume out from under the user
             self._armed_id = sid
@@ -1276,7 +1486,7 @@ class SessionBrowser(App):
         self._rebuild_tree()
         self._update_status()
         sort_label = "folder name" if self.sort_mode == "name" else self.sort_mode
-        self.sub_title = f"sorted by {sort_label}"
+        self.sub_title = ("DEMO DATA · " if DEMO else "") + f"sorted by {sort_label}"
 
     def _toggle_skip_perms(self):
         prefs = self._load_prefs()
@@ -1300,7 +1510,7 @@ class SessionBrowser(App):
         self._rebuild_tree()
         self._update_status()
         sort_label = "folder name" if self.sort_mode == "name" else self.sort_mode
-        self.sub_title = f"sorted by {sort_label}"
+        self.sub_title = ("DEMO DATA · " if DEMO else "") + f"sorted by {sort_label}"
 
     def action_toggle_select(self):
         tree = self.query_one("#session-tree", Tree)
@@ -1571,10 +1781,14 @@ class SessionBrowser(App):
 
 
 def main():
+    if "--demo" in sys.argv[1:]:
+        setup_demo()
     app = SessionBrowser()
     app.run()
 
-    # After the app exits, if a session was selected, print the resume command
+    # After the app exits, if a session was selected, print the resume command.
+    # Demo sessions are fake, so resuming one would drop the user into a directory
+    # that does not exist; the app reports the intent instead of exiting.
     if app._resume_session:
         s = app._resume_session
         prefs = SessionBrowser._load_prefs()
