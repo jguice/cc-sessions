@@ -177,11 +177,11 @@ def drop_summary(session_id: str):
 # Where a row's label came from. Shown in the list as a glyph and named in the preview,
 # so it is always clear whether you are reading a real title or just raw transcript text.
 LABEL_SOURCES = {
-    "local":   (ICON_RENAME, "the name you set"),
-    "custom":  (ICON_RENAME, "the name set with /rename in Claude Code"),
+    "local":   (ICON_RENAME, "a name you set (n, or /rename in Claude Code)"),
+    "custom":  (ICON_RENAME, "a name you set (n, or /rename in Claude Code)"),
     "summary": (ICON_MAGIC, "a summary you generated"),
     "ai":      (ICON_AI, "Claude Code's generated title"),
-    "prompt":  (ICON_NONE, "no title yet; showing your last prompt"),
+    "prompt":  (ICON_NONE, "no title yet; showing raw transcript text"),
     "message": (ICON_NONE, "no title yet; showing your last message"),
     "id":      (ICON_NONE, "no title yet; showing the session id"),
 }
@@ -596,10 +596,15 @@ class LegendScreen(ModalScreen[None]):
     def compose(self) -> ComposeResult:
         rows = Text()
         rows.append("Row glyphs\n\n", style="bold")
-        for key in ("local", "custom", "summary", "ai", "prompt"):
+        # local/custom share a glyph, as do prompt/message/id: one row per glyph
+        seen = set()
+        for key in ("local", "custom", "summary", "ai", "prompt", "message", "id"):
             glyph, desc = LABEL_SOURCES[key]
+            if glyph in seen:
+                continue
+            seen.add(glyph)
             rows.append(f"  {glyph}  ", style="bold")
-            rows.append(f"{desc}\n", style="" if key != "prompt" else "italic")
+            rows.append(f"{desc}\n", style="italic" if glyph == ICON_NONE else "")
         rows.append("\nA dimmed italic row has no title yet, so you are\n"
                     "reading raw transcript text. Press ", style="dim")
         rows.append("c", style="bold")
