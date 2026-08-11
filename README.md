@@ -9,9 +9,10 @@ Claude Code scatters session history across every project directory you've ever 
 
 ## Features
 
-- **Unified view**: All sessions grouped by project directory, across your whole machine, each showing its latest message
+- **Unified view**: All sessions grouped by project directory, across your whole machine, each showing the title Claude Code generated for it
 - **Resume from anywhere**: Pick a session and `cd` into its working dir + resume automatically
-- **Preview pane**: See the first and most recent user messages, session size, and metadata before resuming
+- **Preview pane**: See where you left off (last prompt and reply), files recently edited, and how the session started
+- **On-demand summaries**: Press `c` to generate a context summary for one session with Haiku, saved for next time
 - **Search / filter**: Find sessions by message content, directory, or custom name
 - **Rename, archive, delete**: Tidy up old sessions (individually or in bulk)
 - **Vi keybindings**: `h/j/k/l`, `g/G`, `ctrl-u/d`
@@ -67,6 +68,7 @@ Run `cc-sessions` from any terminal. You'll get a tree view of every Claude Code
 | `/` | Search / filter |
 | `s` | Cycle sort mode (recency / size / name) |
 | `n` | Rename session |
+| `c` | Summarize session (Haiku) |
 | `a` | Archive session |
 | `x` | Delete session |
 | `Space` | Multi-select |
@@ -86,10 +88,13 @@ Preferences live in `~/.config/cc-sessions/`:
 
 - `prefs.json` - theme, skip-permissions toggle
 - `session-names.json` - your custom session names
+- `summaries.json` - summaries generated with `c`
 
 Archived sessions are moved to `~/.claude/archived-sessions/`.
 
-Session names set via Claude's `/rename` command are auto-detected from `~/.claude/history.jsonl`. Local names in `session-names.json` take priority when both exist.
+Session names set via Claude's `/rename` command are read from the session file itself. Local names in `session-names.json` take priority when both exist.
+
+Row labels use the first of: your local name, Claude's `/rename` name, a summary you generated with `c`, the title Claude Code generated, the last prompt, the last message, the session id. A summary you generate outranks Claude's own title until Claude writes a new one, which happens when you resume the session.
 
 ## Uninstall
 
@@ -105,7 +110,14 @@ Remove the `source` line from `~/.bashrc` and/or `~/.zshrc` if present.
 
 ## Contributing
 
-Issues and PRs welcome. No formal build, tests, or release automation yet; just run `./install.sh` locally to try your changes.
+Issues and PRs welcome. No formal build or release automation yet; just run `./install.sh` locally to try your changes.
+
+Tests cover extraction, sanitizing, and label precedence:
+
+```bash
+~/.local/share/cc-sessions-venv/bin/pip install -r requirements-dev.txt
+~/.local/share/cc-sessions-venv/bin/pytest tests/
+```
 
 ## License
 

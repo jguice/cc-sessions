@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import glob
+import subprocess
 import time
 import sys
 from functools import partial
@@ -40,7 +41,14 @@ ARCHIVE_DIR = os.path.join(HOME, ".claude", "archived-sessions")
 CONFIG_DIR = os.path.join(HOME, ".config", "cc-sessions")
 NAMES_FILE = os.path.join(CONFIG_DIR, "session-names.json")
 PREFS_FILE = os.path.join(CONFIG_DIR, "prefs.json")
-HISTORY_FILE = os.path.join(HOME, ".claude", "history.jsonl")
+SUMMARIES_FILE = os.path.join(CONFIG_DIR, "summaries.json")
+
+# Tail window: every ai-title / custom-title / last-prompt record Claude Code writes
+# sits within ~31KB of EOF (measured worst case 31,365 bytes across 1,391 sessions).
+TAIL_WINDOW = 128 * 1024
+LABEL_MAX = 200
+BODY_MAX = 2000
+SUMMARY_TIMEOUT = 90
 
 SORT_MODES = ["recency", "size", "name"]
 
@@ -82,45 +90,15 @@ def condense_path(path: str) -> str:
     return short
 
 
-def load_claude_renames() -> dict:
-    """Parse /rename commands from Claude's history.jsonl.
-
-    Later renames for the same session override earlier ones.
-    """
-    names = {}  # type: Dict[str, str]
-    if not os.path.exists(HISTORY_FILE):
-        return names
-    try:
-        with open(HISTORY_FILE) as f:
-            for line in f:
-                try:
-                    d = json.loads(line)
-                except Exception:
-                    continue
-                display = d.get("display", "")
-                if display.startswith("/rename "):
-                    sid = d.get("sessionId", "")
-                    name = display[len("/rename "):].strip()
-                    if sid and name:
-                        names[sid] = name
-                    elif sid and not name:
-                        names.pop(sid, None)
-    except Exception:
-        pass
-    return names
-
-
 def load_session_names() -> dict:
-    # Claude's /rename commands are the base; local overrides take priority
-    names = load_claude_renames()
+    """Local names only. Claude's /rename is read from the session file (custom-title)."""
     if os.path.exists(NAMES_FILE):
         try:
             with open(NAMES_FILE) as f:
-                local = json.load(f)
-            names.update(local)
+                return json.load(f)
         except Exception:
             pass
-    return names
+    return {}
 
 
 def save_session_names(names: dict):
@@ -129,12 +107,105 @@ def save_session_names(names: dict):
         json.dump(names, f, indent=2)
 
 
+_TAG_RE = re.compile(r"<[^>]+>")
+_CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def clean_label(text: str, max_len: int = LABEL_MAX) -> str:
+    """Sanitize a string destined for a row label or preview heading."""
+    if not text:
+        return ""
+    text = _TAG_RE.sub("", text)
+    text = _CTRL_RE.sub(" ", text)
+    text = " ".join(text.split())
+    if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
+        text = text[1:-1].strip()
+    return text[:max_len]
+
+
+def clean_body(text: str, max_len: int = BODY_MAX) -> str:
+    """Sanitize multi-line prose for the preview: keep newlines, neutralize markup."""
+    if not text:
+        return ""
+    text = _CTRL_RE.sub(" ", text)
+    # Demote injected headings so model/user text can't open a peer section
+    text = re.sub(r"(?m)^(#{1,6})\s*(.+)$", r"**\2**", text)
+    text = text[:max_len].rstrip()
+    # Balance code fences: an unclosed fence would swallow every section below
+    if text.count("```") % 2:
+        text += "\n```"
+    return text
+
+
+def load_summaries() -> dict:
+    if os.path.exists(SUMMARIES_FILE):
+        try:
+            with open(SUMMARIES_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def save_summary(session_id: str, entry: dict):
+    """Merge one entry into summaries.json without clobbering another instance's writes."""
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    current = load_summaries()
+    current[session_id] = entry
+    tmp = SUMMARIES_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(current, f, indent=2)
+    os.replace(tmp, SUMMARIES_FILE)
+
+
+def drop_summary(session_id: str):
+    current = load_summaries()
+    if current.pop(session_id, None) is None:
+        return
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    tmp = SUMMARIES_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(current, f, indent=2)
+    os.replace(tmp, SUMMARIES_FILE)
+
+
+def resolve_label(session: dict, names: dict, summaries: dict) -> str:
+    """Seven-level precedence for a session's display label."""
+    sid = session["session_id"]
+    local = names.get(sid, "")
+    if local:
+        return local
+    if session.get("custom_title"):
+        return session["custom_title"]
+    entry = summaries.get(sid) or {}
+    if entry.get("title"):
+        # A saved summary wins only while the ai-title it overrode is unchanged.
+        # If Claude wrote a genuinely new title since, that new title supersedes it.
+        if clean_label(entry.get("ai_title_at_generation") or "") == (session.get("ai_title") or ""):
+            return entry["title"]
+    if session.get("ai_title"):
+        return session["ai_title"]
+    if session.get("last_prompt"):
+        return session["last_prompt"]
+    if session.get("last_msg"):
+        return session["last_msg"]
+    return sid[:12]
+
+
 def _extract_user_text(d):
-    """Extract user message text from a parsed JSONL entry. Returns (oneline, raw) or None."""
-    if d.get("type") != "user":
+    """Extract typed user text from a parsed JSONL entry. Returns (oneline, raw) or None.
+
+    Skips isMeta records (hook injections) and tool_result carriers: every consumer wants
+    "a message the user actually typed". This changes last_msg on ~16% of sessions.
+    """
+    if d.get("type") != "user" or d.get("isMeta"):
         return None
     content = d.get("message", {}).get("content", "")
     if isinstance(content, list):
+        # A block list containing a tool_result is a tool response, not a typed message
+        for c in content:
+            if isinstance(c, dict) and c.get("type") == "tool_result":
+                return None
         for c in content:
             if isinstance(c, dict) and c.get("type") == "text":
                 text = c["text"].strip()
@@ -146,6 +217,71 @@ def _extract_user_text(d):
         if text:
             return text.replace("\n", " "), text
     return None
+
+
+def _rel_path(path: str, cwd: str) -> str:
+    """trackingPath is cwd-relative when under cwd; tool_use file_path is absolute."""
+    if not path:
+        return ""
+    if not os.path.isabs(path) and cwd:
+        path = os.path.join(cwd, path)
+    return os.path.normpath(path)
+
+
+def _parse_tail(jsonl_path: str, cwd: str) -> dict:
+    """Parse the 128KB tail window for title, prompt, reply and edited-file records."""
+    out = {
+        "ai_title": "", "custom_title": "", "last_prompt": "",
+        "last_assistant": "", "files_edited": [], "last_msg": "",
+    }
+    files = []
+    asst_idx = user_idx = -1
+    asst_text = ""
+    for i, line in enumerate(_read_tail_lines(jsonl_path)):
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue  # includes the torn first line; expected, not an error
+        t = d.get("type")
+        if t == "ai-title":
+            if d.get("aiTitle"):
+                out["ai_title"] = clean_label(d["aiTitle"])
+        elif t == "custom-title":
+            if d.get("customTitle"):
+                out["custom_title"] = clean_label(d["customTitle"])
+        elif t == "last-prompt":
+            # 0.8% of these records carry no lastPrompt field
+            if d.get("lastPrompt"):
+                out["last_prompt"] = d["lastPrompt"]
+        elif t == "file-history-delta":
+            p = _rel_path(d.get("trackingPath", ""), cwd)
+            if p:
+                files.append(p)
+        elif t == "assistant":
+            msg = d.get("message", {}) or {}
+            if msg.get("model") != "<synthetic>":
+                for b in msg.get("content", []) or []:
+                    if isinstance(b, dict) and b.get("type") == "text" and b.get("text", "").strip():
+                        asst_idx, asst_text = i, b["text"].strip()
+            for b in msg.get("content", []) or []:
+                if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") in (
+                    "Edit", "Write", "NotebookEdit"
+                ):
+                    inp = b.get("input") or {}
+                    p = _rel_path(inp.get("file_path") or inp.get("notebook_path") or "", cwd)
+                    if p:
+                        files.append(p)
+        if t == "user":
+            result = _extract_user_text(d)
+            if result:
+                user_idx = i
+                out["last_msg"] = result[0]
+    # Only pair the reply with the prompt when it actually followed it
+    if asst_idx > user_idx:
+        out["last_assistant"] = asst_text
+    seen = set()
+    out["files_edited"] = [p for p in files if not (p in seen or seen.add(p))]
+    return out
 
 
 def load_sessions():
@@ -179,36 +315,18 @@ def load_sessions():
                     if cwd and first_msg:
                         break
 
-            # Read tail for last user messages (character budget)
-            TAIL_CHAR_BUDGET = 1500
-            all_tail = []
-            tail_lines = _read_tail_lines(jsonl_path, max_lines=30)
-            for line in tail_lines:
-                try:
-                    d = json.loads(line)
-                except Exception:
-                    continue
-                result = _extract_user_text(d)
-                if result:
-                    all_tail.append(result)
-            # Walk backwards collecting messages until we hit the budget
-            last_msgs = []
-            last_msgs_raw = []
-            budget = TAIL_CHAR_BUDGET
-            for oneline, raw in reversed(all_tail):
-                if budget <= 0:
-                    break
-                last_msgs.append(oneline)
-                last_msgs_raw.append(raw)
-                budget -= len(raw)
-            last_msgs.reverse()
-            last_msgs_raw.reverse()
+            # Single tail read yields titles, prompt, reply, edited files and last_msg
+            meta = _parse_tail(jsonl_path, cwd)
+            last_msg = meta["last_msg"]
         except Exception:
             continue
         if cwd:
-            # Use last message for list display, fall back to first
-            last_msg = last_msgs[-1] if last_msgs else first_msg
+            if not last_msg:
+                last_msg = first_msg
             cwd_short = cwd.replace(HOME, "~")
+            ai_title = meta["ai_title"]
+            custom_title = meta["custom_title"]
+            last_prompt = clean_label(meta["last_prompt"], BODY_MAX)
             sessions.append({
                 "mtime": mtime,
                 "session_id": session_id,
@@ -218,30 +336,40 @@ def load_sessions():
                 "first_msg": first_msg,
                 "first_msg_raw": first_msg_raw,
                 "last_msg": last_msg,
-                "last_msgs_raw": last_msgs_raw,
+                "ai_title": ai_title,
+                "custom_title": custom_title,
+                "last_prompt": last_prompt,
+                "last_assistant": meta["last_assistant"],
+                "files_edited": meta["files_edited"],
                 "path": jsonl_path,
                 "size": fsize,
                 "age": time.time() - mtime,
-                # Pre-lowered for fast search filtering
-                "_search": (first_msg + " " + last_msg + " " + cwd_short + " " + session_id).lower(),
+                # Pre-lowered for fast search filtering. Local names and summaries are
+                # matched live instead, since both mutate at runtime.
+                "_search": " ".join((
+                    first_msg, last_msg, cwd_short, session_id,
+                    ai_title, custom_title, last_prompt,
+                )).lower(),
             })
     return sessions
 
 
-def _read_tail_lines(filepath, max_lines=100):
-    """Read the last max_lines lines from a file efficiently."""
+def _read_tail_lines(filepath):
+    """Read the tail window of a file as lines.
+
+    The whole window is returned: the records we need sit up to 28 lines from EOF. The
+    first line is partial for files larger than the window (the seek lands mid-line);
+    callers discard it via their own json parse failure.
+    """
     try:
         with open(filepath, "rb") as f:
             f.seek(0, 2)
             fsize = f.tell()
             if fsize == 0:
                 return []
-            # Read up to 128KB from the end
-            chunk_size = min(fsize, 128 * 1024)
+            chunk_size = min(fsize, TAIL_WINDOW)
             f.seek(fsize - chunk_size)
-            data = f.read().decode("utf-8", errors="replace")
-            lines = data.splitlines()
-            return lines[-max_lines:]
+            return f.read().decode("utf-8", errors="replace").splitlines()
     except Exception:
         return []
 
@@ -311,6 +439,100 @@ def prepare_markdown(msg: str) -> str:
     return table_pattern.sub(
         lambda m: "\n```\n" + render_table(m.group(0)) + "\n```\n", msg
     )
+
+
+SUMMARY_PROMPT = (
+    "You summarize Claude Code session transcripts. Output ONLY minified JSON: "
+    '{"title":"...","body":"..."}. No markdown fences, no preamble. '
+    "title: under 60 characters, describing what the session was about. "
+    "body: 2-3 sentences on what was accomplished and where the work stopped."
+)
+
+_SUMMARY_HEAD = 256 * 1024
+_SUMMARY_TAIL = 512 * 1024
+_SUMMARY_MAX_CHARS = 60 * 1024
+
+
+def _summary_input(session: dict) -> str:
+    """User prompts and assistant text only, from a bounded head read and tail seek.
+
+    The middle of the file is never read: sessions reach 205MB and are mostly tool output.
+    """
+    path = session["path"]
+    chunks = []
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            head = f.read(_SUMMARY_HEAD)
+            if size > _SUMMARY_HEAD + _SUMMARY_TAIL:
+                f.seek(size - _SUMMARY_TAIL)
+                tail = f.read(_SUMMARY_TAIL)
+            else:
+                tail = b""
+    except Exception:
+        return ""
+    for blob, is_tail in ((head, False), (tail, True)):
+        lines = blob.decode("utf-8", errors="replace").splitlines()
+        # The seek/read boundary lands mid-line: drop the partial end of each chunk
+        if is_tail:
+            lines = lines[1:]
+        elif len(blob) == _SUMMARY_HEAD and lines:
+            lines = lines[:-1]
+        for line in lines:
+            try:
+                d = json.loads(line)
+            except Exception:
+                continue
+            result = _extract_user_text(d)
+            if result:
+                chunks.append("USER: " + result[1][:1500])
+                continue
+            if d.get("type") == "assistant":
+                msg = d.get("message", {}) or {}
+                if msg.get("model") == "<synthetic>":
+                    continue
+                for b in msg.get("content", []) or []:
+                    if isinstance(b, dict) and b.get("type") == "text" and b.get("text", "").strip():
+                        chunks.append("ASSISTANT: " + b["text"].strip()[:1500])
+        if not is_tail and tail:
+            chunks.append("... (middle of session omitted) ...")
+    text = "\n\n".join(chunks)
+    return text[:_SUMMARY_MAX_CHARS]
+
+
+def generate_summary(session: dict):
+    """Run Claude Code headless with Haiku. Returns {"title","body"} or None."""
+    transcript = _summary_input(session)
+    if not transcript.strip():
+        return None
+    cmd = [
+        "claude", "-p", "--model", "haiku",
+        # --safe-mode is load-bearing: without it CLAUDE.md, hooks, MCP and plugins load,
+        # which triples latency and leaks the user's custom instructions into the output.
+        "--safe-mode", "--tools", "", "--no-session-persistence",
+        "--system-prompt", SUMMARY_PROMPT,
+        "Summarize this session transcript:\n\n" + transcript,
+    ]
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=SUMMARY_TIMEOUT
+        )
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    raw = (proc.stdout or "").strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```[a-z]*\n?|\n?```$", "", raw).strip()
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return None
+    title = clean_label(str(data.get("title", "")))
+    body = clean_body(str(data.get("body", "")))
+    if not title:
+        return None
+    return {"title": title, "body": body}
 
 
 # ---------------------------------------------------------------------------
@@ -395,6 +617,7 @@ class SessionCommands(Provider):
         ("Archive Session", "Archive the selected session", "archive"),
         ("Delete Session", "Permanently delete the selected session", "delete"),
         ("Rename Session", "Name or rename the selected session", "rename"),
+        ("Summarize Session", "Generate a context summary with Haiku", "summarize"),
         ("Toggle Skip Permissions", "Resume sessions with --dangerously-skip-permissions", "toggle_skip_perms"),
     ]
 
@@ -509,6 +732,7 @@ class SessionBrowser(App):
         Binding("shift+x", "delete_selected", "Del All", show=False),
         Binding("shift+a", "archive_selected", "Arc All", show=False),
         Binding("n", "rename", f"{ICON_RENAME} Name"),
+        Binding("c", "summarize", "Summarize"),
         Binding("space", "toggle_select", "Select", show=False),
         Binding("e", "expand_all", "Expand All"),
         Binding("shift+e", "collapse_all", "Collapse All", show=False),
@@ -527,6 +751,8 @@ class SessionBrowser(App):
         self.theme = prefs.get("theme", "gruvbox")
         self.sessions = []
         self.session_names = {}
+        self.summaries = load_summaries()
+        self._summarizing = set()
         self.sort_mode = "name"
         self.selected_ids: Set[str] = set()
         self.filter_text = ""
@@ -559,11 +785,13 @@ class SessionBrowser(App):
     def _load_sessions_async(self):
         sessions = load_sessions()
         names = load_session_names()
-        self.call_from_thread(self._finish_loading, sessions, names)
+        summaries = load_summaries()
+        self.call_from_thread(self._finish_loading, sessions, names, summaries)
 
-    def _finish_loading(self, sessions, names):
+    def _finish_loading(self, sessions, names, summaries):
         self.sessions = sessions
         self.session_names = names
+        self.summaries = summaries
         self._loading = False
         self._rebuild_tree()
         self._update_status()
@@ -624,6 +852,7 @@ class SessionBrowser(App):
                 s for s in self.sessions
                 if ft in s["_search"]
                 or ft in self.session_names.get(s["session_id"], "").lower()
+                or ft in self._summary_text(s["session_id"])
             ]
         groups = group_sessions(filtered, self.sort_mode)
         # Pre-compute label parts as plain data
@@ -635,7 +864,7 @@ class SessionBrowser(App):
                     "session": s,
                     "age": human_age(s["age"]),
                     "size": human_size(s["size"]),
-                    "name": self.session_names.get(s["session_id"], ""),
+                    "label": resolve_label(s, self.session_names, self.summaries),
                     "selected": s["session_id"] in self.selected_ids,
                 })
             prepared.append((cwd, item_data))
@@ -670,9 +899,10 @@ class SessionBrowser(App):
                 label.append(f"{ICON_CLOCK} {item['age']:>7} ", style=f"{accent}")
                 label.append(f"{ICON_SIZE} {item['size']:>7}", style="dim")
                 label.append("  ", style="")
-                if item["name"]:
-                    label.append(f"[{item['name']}] ", style=f"bold {secondary}")
-                label.append(s["last_msg"])
+                label.append(item["label"], style=f"{secondary}")
+                tail = s.get("last_prompt", "")
+                if tail and tail != item["label"]:
+                    label.append(f"  · {clean_label(tail)}", style="dim")
 
                 leaf = dir_node.add_leaf(label)
                 leaf.data = s
@@ -723,36 +953,44 @@ class SessionBrowser(App):
             return
 
         sid = session["session_id"]
-        name = self.session_names.get(sid, "")
-        size = human_size(session["size"])
-        name_line = f"\n**Name:** {name}" if name else ""
+        label = resolve_label(session, self.session_names, self.summaries)
+        meta_bits = [f"`{session['cwd_short']}`", human_size(session["size"])]
+        parts = ["## " + label, " · ".join(meta_bits)]
 
-        first_raw = prepare_markdown(session.get("first_msg_raw", ""))
-        last_msgs_raw = session.get("last_msgs_raw", [])
+        entry = self.summaries.get(sid) or {}
+        if entry.get("body"):
+            when = time.strftime("%Y-%m-%d", time.localtime(entry.get("generated_at", 0)))
+            head = f"*Generated {when}"
+            if entry.get("title"):
+                head += f' · "{entry["title"]}"'
+            if entry.get("session_mtime", 0) < session["mtime"]:
+                head += " · session has changed since"
+            parts += ["### Summary", head + "*", entry["body"]]
 
-        # Build the message section: first message, then truncation + last messages
-        msg_parts = [first_raw]
+        if session.get("last_prompt") or session.get("last_assistant"):
+            parts.append("### Where I left off")
+            if session.get("last_prompt"):
+                quoted = "\n".join("> " + l for l in session["last_prompt"].split("\n"))
+                parts.append(quoted)
+            if session.get("last_assistant"):
+                parts.append(prepare_markdown(clean_body(session["last_assistant"])))
 
-        # Show last messages if they differ from the first
-        if last_msgs_raw:
-            last_preview = [prepare_markdown(m) for m in last_msgs_raw]
-            # Check if the last messages are different from the first
-            if last_preview != [first_raw] and last_preview != [first_raw][:len(last_preview)]:
-                msg_parts.append("\n\n---\n\n*... (earlier messages omitted)*\n")
-                for m in last_preview:
-                    msg_parts.append(m)
+        files = session.get("files_edited") or []
+        if files:
+            parts.append(f"### Recently edited ({len(files)})")
+            shown = files[:10]
+            for p in shown:
+                rel = os.path.relpath(p, session["cwd"]) if p.startswith(session["cwd"]) else p
+                parts.append(f"- `{rel}`")
+            if len(files) > len(shown):
+                parts.append(f"- *+{len(files) - len(shown)} more*")
 
-        msg = "\n\n".join(msg_parts)
+        if session.get("first_msg_raw"):
+            parts += ["### Started with",
+                      prepare_markdown(clean_body(session["first_msg_raw"]))]
 
-        md = f"""**Session:** {sid}{name_line}
-**Directory:** {session['cwd_short']}
-**Size:** {size}
-
----
-
-{msg}
-"""
-        preview.update(md)
+        parts.append(f"---\n\n*`{sid}`*")
+        preview.update("\n\n".join(parts))
 
     # -- Event handlers --
 
@@ -905,6 +1143,7 @@ class SessionBrowser(App):
             "archive": self.action_archive,
             "delete": self.action_delete,
             "rename": self.action_rename,
+            "summarize": self.action_summarize,
             "toggle_skip_perms": self._toggle_skip_perms,
         }
         if command in actions:
@@ -958,7 +1197,7 @@ class SessionBrowser(App):
         node = tree.cursor_node
         if node and node.data:
             s = node.data
-            name = self.session_names.get(s["session_id"], s["session_id"][:12])
+            name = resolve_label(s, self.session_names, self.summaries)
             self.push_screen(
                 ConfirmDialog(f"Delete session '{name}' permanently?"),
                 callback=lambda ok: self._do_delete([s]) if ok else None,
@@ -969,7 +1208,7 @@ class SessionBrowser(App):
         node = tree.cursor_node
         if node and node.data:
             s = node.data
-            name = self.session_names.get(s["session_id"], s["session_id"][:12])
+            name = resolve_label(s, self.session_names, self.summaries)
             self.push_screen(
                 ConfirmDialog(f"Archive session '{name}'?"),
                 callback=lambda ok: self._do_archive([s]) if ok else None,
@@ -1004,6 +1243,57 @@ class SessionBrowser(App):
                 callback=lambda name: self._do_rename(sid, name),
             )
 
+    def _summary_text(self, session_id: str) -> str:
+        entry = self.summaries.get(session_id) or {}
+        return (entry.get("title", "") + " " + entry.get("body", "")).lower()
+
+    def action_summarize(self):
+        tree = self.query_one("#session-tree", Tree)
+        node = tree.cursor_node
+        if not node or not node.data:
+            return
+        s = node.data
+        sid = s["session_id"]
+        if sid in self._summarizing:
+            self.notify("Already summarizing this session")
+            return
+        self._summarizing.add(sid)
+        self.query_one("#status-bar", Static).update(f"Summarizing {sid[:8]}...")
+        self._summarize_async(s)
+
+    @work(thread=True)
+    def _summarize_async(self, session: dict):
+        result = generate_summary(session)
+        self.call_from_thread(self._finish_summary, session, result)
+
+    def _finish_summary(self, session: dict, result):
+        sid = session["session_id"]
+        self._summarizing.discard(sid)
+        if not result:
+            self._update_status()
+            self.notify("Summary failed; previous summary kept", severity="warning")
+            return
+        entry = {
+            "title": result["title"],
+            "body": result["body"],
+            "generated_at": int(time.time()),
+            "session_mtime": session["mtime"],
+            "ai_title_at_generation": session.get("ai_title", ""),
+        }
+        try:
+            save_summary(sid, entry)
+        except Exception:
+            self._update_status()
+            self.notify("Could not write summaries.json", severity="error")
+            return
+        self.summaries[sid] = entry
+        session["_search"] = (session["_search"] + " " + entry["title"] + " " + entry["body"]).lower()
+        self._update_status()
+        self.notify(f'Summary: {entry["title"]}')
+        # Preserve folder expansion and cursor across the rebuild the new label triggers
+        self._pending_view_state = (self._snapshot_expanded_cwds(), sid)
+        self._rebuild_tree()
+
     def _do_delete(self, targets: List[dict]):
         for s in targets:
             try:
@@ -1014,6 +1304,10 @@ class SessionBrowser(App):
                     shutil.rmtree(subdir, ignore_errors=True)
             except Exception:
                 pass
+            drop_summary(s["session_id"])
+            self.summaries.pop(s["session_id"], None)
+            if self.session_names.pop(s["session_id"], None) is not None:
+                save_session_names(self.session_names)
             self.selected_ids.discard(s["session_id"])
         self.sessions = [s for s in self.sessions if s not in targets]
         self._rebuild_tree()

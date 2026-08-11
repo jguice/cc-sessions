@@ -146,9 +146,16 @@ near-zero cost) but its output narrows:
 
 - `last_msg`: **kept**, feeds `_search` and the precedence-6 row fallback. It uses the
   **same user-record predicate as `last_assistant`** (excluding `isMeta` records and
-  tool_result carriers), not bare `_extract_user_text`. Otherwise a level-6 row can be
-  labeled with a hook injection or `[Request interrupted by user]`, which carries no tags
-  and so survives the `<...>` strip. One shared helper, written once.
+  tool_result carriers). Otherwise a level-6 row can be labeled with a hook injection or
+  `[Request interrupted by user]`, which carries no tags and so survives the `<...>` strip.
+
+**The filter goes inside `_extract_user_text` (`:139-153`), not into a separate predicate.**
+Every consumer wants the same definition of "a message the user actually typed", and the
+function is the one place in the file that decides it. This is a deliberate behavior change
+with a measured blast radius: `last_msg` changes on **222 of 1,389 sessions (16%)** and
+`first_msg` on 17. That is intended, not a regression. Filtering only at the ordering
+comparison would leave level 6 rescuing a session from a hex id by labeling it with the
+exact hook injection the filter exists to exclude.
 - `last_msgs_raw`: **retired.** Its only consumer is `_update_preview` (`:731-745`), and
   `Where I left off` supersedes it. `TAIL_CHAR_BUDGET` goes with it.
 - `first_msg`, `first_msg_raw`, `cwd`, `size`, `mtime`: unchanged.
@@ -378,8 +385,10 @@ Reuses the Claude Code CLI the tool already requires, and its OAuth, so no API k
 new dependency. `--safe-mode` is the load-bearing flag: it disables CLAUDE.md, hooks, MCP,
 skills, and plugins. Without it the call takes 6-11s and the user's `CLAUDE.md` leaks into
 the output (reproduced: the unisolated run prefixes its answer with the `STARTER_CHARACTER`
-from `~/.claude/CLAUDE.md`, intermittently). With it, output is clean; measured wall time
-ranges **3.8s to 5.5s**, so the subprocess timeout is **30s**. `--bare` is not usable: it
+from `~/.claude/CLAUDE.md`, intermittently). With it, output is clean. Wall time scales with how much
+conversation text the session yields: a trivial prompt returns in ~4s, while a real
+session with a full input budget measured **17.5s and 24.0s**. The subprocess timeout is
+therefore **90s**, not 30s. `--bare` is not usable: it
 refuses OAuth, requires `ANTHROPIC_API_KEY` which is not set, and exits 1 with
 `Not logged in`.
 
@@ -399,10 +408,19 @@ that produced the same text is visibly distinguishable from a no-op.
 ### Input construction
 
 User prompts and assistant `text` blocks only; tool calls and results are dropped, being
-most of the bytes and little of the meaning. Head is a **bounded read from the start** and
-tail a **bounded seek from EOF**, so the middle is never read. A line-by-line filter across
-the 205 MB session would satisfy "head and tail with the middle elided" while stalling the
-worker for minutes.
+most of the bytes and little of the meaning. Head is a **bounded read from the start**
+(256 KB) and tail a **bounded seek from EOF** (512 KB), so the middle is never read. A
+line-by-line filter across the 205 MB session would satisfy "head and tail with the middle
+elided" while stalling the worker for minutes.
+
+**Both chunk boundaries land mid-line and both partial lines must be dropped**: the tail's
+first line and the head's last. Extracted text is then capped at 60 KB.
+
+These budgets were tuned against measurement, not guessed. At 40 KB / 60 KB a 3.5 MB
+session yielded only 1,442 characters of conversation, because tool payloads dominate the
+bytes, and the resulting summary was visibly shallow and partly wrong. At 256 KB / 512 KB
+the same session yields 4,221 characters and an accurate summary. The reads themselves are
+free (0.00s); latency comes from the model call.
 
 ### Output contract
 
