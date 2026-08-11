@@ -519,3 +519,49 @@ Two test groups, covering the two things that will actually be wrong:
 
 Broken extraction is obvious the moment the TUI opens; precedence is not. Beyond these,
 verification is running the TUI against the real corpus.
+
+## As built
+
+Implemented in 55d088b..9533d76. What changed from the design above, and why:
+
+**`resolve_label` returns `(label, source)`, not a bare string.** Every label rendered
+identically, so there was no way to tell Claude Code's own title from a rename, a generated
+summary, or raw transcript text. `LABEL_SOURCES` maps each of the seven levels to a glyph
+and a description.
+
+**Rows carry a source glyph; untitled rows render dimmed italic.** The glyph set is
+single-width Font Awesome so columns stay aligned: pencil for a name you set, star for a
+summary you generated, magic wand for Claude Code's title, empty circle for no title yet.
+`U+F544` was tried first and renders as a fallback character in the user's font; the
+newer Material Design range has spotty coverage, so stay in `U+F0xx-F2xx`. Emoji render
+reliably but are double-width and ragged the column.
+
+**The preview names the source with the glyph alone, not prose.** An earlier
+"**Showing:** ..." line read as a floating fragment rather than an annotation of the
+heading. The glyph now sits on the heading itself. `?` opens `LegendScreen`, which lists
+one row per glyph (local/custom share one, as do prompt/message/id) plus the precedence
+order.
+
+**The summary block omits its own title when that title is already the heading**, which is
+the common case, and shows Claude's own title on a separate line only when something else
+won the row. Those are different facts, not a restatement.
+
+**`Started with` precedes `Where I left off`** so the pane reads in time order.
+
+**A mouse click previews; a second click on the same row resumes.** Selecting a row
+resumed it immediately, which made the list unbrowsable by mouse. `Enter` is unchanged,
+since the row is already highlighted when you press it. Tracked with `_mouse_input`
+(set in `on_mouse_down`, cleared in `on_key`) and `_armed_id` (cleared on highlight change).
+
+**Default sort is recency**, not folder name.
+
+**Summarizing shows an animated spinner and elapsed seconds** on both the status bar and
+the row itself, repainted via `node.set_label()` on a 0.1s interval. A status-bar string
+alone was missed entirely during a 5-25s call. The row is repainted in place rather than
+through `_rebuild_tree`, which would collapse folders mid-run.
+
+**The single tail read serves everything.** `_parse_tail` returns `last_msg` alongside the
+titles, so `load_sessions` reads the window once rather than twice. Full load of 1,390
+sessions measures 0.80s.
+
+**`git_branch` was dropped** before implementation; see the Key finding section.
