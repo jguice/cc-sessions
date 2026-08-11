@@ -56,7 +56,7 @@ cc-sessions
 Run `cc-sessions` from any terminal. You'll get a tree view of every Claude Code session on your machine, grouped by working directory.
 
 - Navigate with arrows or `h/j/k/l`
-- Press `Enter` on a session to **resume it** (cc-sessions will `cd` to the session's original working directory and run `claude --resume <id>`)
+- Press `Enter` on a session to **resume it**, or click it once to preview and again to resume (cc-sessions will `cd` to the session's original working directory and run `claude --resume <id>`)
 - Press `/` to search, `s` to cycle sort modes, `n` to name a session
 - Press `ctrl-p` for the full command palette
 
@@ -65,6 +65,7 @@ Run `cc-sessions` from any terminal. You'll get a tree view of every Claude Code
 | Key | Action |
 |-----|--------|
 | `Enter` | Resume selected session |
+| Click | First click previews, second click resumes |
 | `/` | Search / filter |
 | `s` | Cycle sort mode (recency / size / name) |
 | `n` | Rename session |
@@ -98,12 +99,12 @@ Row labels use the first available of these, and a glyph tells you which one you
 
 | Glyph | Source |
 |-------|--------|
-|  | Your name, or a `/rename` from inside Claude Code |
-|  | A summary you generated with `c` |
-|  | The title Claude Code generated on its own |
-| *(none, dimmed italic)* | No title exists; showing your last prompt, last message, or the session id |
+| pencil | The name you set, or a `/rename` from inside Claude Code |
+| magic wand | A summary you generated with `c` |
+| lightbulb | The title Claude Code generated on its own |
+| quote *(dimmed italic)* | No title yet; showing your last prompt, last message, or the session id |
 
-A dimmed italic row means Claude Code never generated a title for that session, so you're reading raw transcript text rather than a summary. The preview names the source explicitly, and when something other than Claude's title won the row it also shows Claude's title underneath.
+A dimmed italic row means Claude Code never generated a title for that session, so you're reading raw transcript text rather than a summary. The preview spells it out under the heading (**Showing:** ...), and when something other than Claude's title won the row it also shows Claude's title on its own line.
 
 A summary you generate outranks Claude's own title until Claude writes a new one, which happens when you resume the session.
 

@@ -65,8 +65,10 @@ ICON_SORT = "\uf0dc"         #
 ICON_ARCHIVE = "\uf187"      #
 ICON_DELETE = "\uf1f8"       #
 ICON_RENAME = "\uf044"       #
-ICON_CLAUDE = "\uf544"       #
-ICON_MAGIC = "\uf0d0"       # summary you generated
+ICON_CLAUDE = "\uf120"       # terminal (app header)
+ICON_MAGIC = "\uf0d0"       # magic wand: a summary you generated
+ICON_AI = "\uf0eb"          # lightbulb: a title Claude Code generated
+ICON_QUOTE = "\uf10d"       # quote: raw transcript text, not a title
 
 
 def human_size(nbytes: int) -> str:
@@ -175,13 +177,13 @@ def drop_summary(session_id: str):
 # Where a row's label came from. Shown in the list as a glyph and named in the preview,
 # so it is always clear whether you are reading a real title or just raw transcript text.
 LABEL_SOURCES = {
-    "local":   (ICON_RENAME, "your name"),
-    "custom":  (ICON_RENAME, "renamed in Claude Code"),
-    "summary": (ICON_MAGIC, "your generated summary"),
-    "ai":      (ICON_CLAUDE, "Claude Code's title"),
-    "prompt":  ("", "no title; your last prompt"),
-    "message": ("", "no title; your last message"),
-    "id":      ("", "no title; session id"),
+    "local":   (ICON_RENAME, "the name you set"),
+    "custom":  (ICON_RENAME, "the name set with /rename in Claude Code"),
+    "summary": (ICON_MAGIC, "a summary you generated"),
+    "ai":      (ICON_AI, "Claude Code's generated title"),
+    "prompt":  (ICON_QUOTE, "your last prompt (no title yet)"),
+    "message": (ICON_QUOTE, "your last message (no title yet)"),
+    "id":      (ICON_QUOTE, "the session id (no title yet)"),
 }
 
 
@@ -769,6 +771,10 @@ class SessionBrowser(App):
         self.session_names = {}
         self.summaries = load_summaries()
         self._summarizing = {}
+        # Mouse needs two clicks: the first previews, the second resumes. Enter still
+        # resumes at once, since the row is already highlighted when you press it.
+        self._mouse_input = False
+        self._armed_id = None
         self._spin_timer = None
         self._spin = 0
         self.sort_mode = "recency"
@@ -1001,10 +1007,11 @@ class SessionBrowser(App):
         label, source = resolve_label(session, self.session_names, self.summaries)
         glyph, source_desc = LABEL_SOURCES[source]
         meta_bits = [f"`{session['cwd_short']}`", human_size(session["size"])]
-        parts = ["## " + label, f"*{(glyph + ' ') if glyph else ''}{source_desc}*",
+        parts = ["## " + label,
+                 f"{glyph} **Showing:** {source_desc}",
                  " · ".join(meta_bits)]
         if source != "ai" and session.get("ai_title"):
-            parts.append(f"*Claude Code's own title: {session['ai_title']}*")
+            parts.append(f"{ICON_AI} **Claude Code's title:** {session['ai_title']}")
 
         entry = self.summaries.get(sid) or {}
         if entry.get("body"):
@@ -1043,8 +1050,11 @@ class SessionBrowser(App):
 
     # -- Event handlers --
 
+    def on_mouse_down(self, event):
+        self._mouse_input = True
+
     def on_tree_node_selected(self, event: Tree.NodeSelected):
-        """When Enter is pressed on a tree node."""
+        """Enter, or a click, on a tree node."""
         if getattr(self, "_suppress_selection_exit", False):
             self._suppress_selection_exit = False
             return
@@ -1052,13 +1062,19 @@ class SessionBrowser(App):
         if node.data is None:
             # Directory node: toggle expand/collapse
             node.toggle()
-        else:
-            # Session node: resume it
-            self._resume_session = node.data
-            self.exit()
+            return
+        sid = node.data["session_id"]
+        if self._mouse_input and self._armed_id != sid:
+            # First click on a row: show it, don't resume out from under the user
+            self._armed_id = sid
+            self._update_preview(node.data)
+            return
+        self._resume_session = node.data
+        self.exit()
 
     def on_tree_node_highlighted(self, event: Tree.NodeHighlighted):
         """Update preview when cursor moves."""
+        self._armed_id = None
         node = event.node
         if node.data is not None:
             self._update_preview(node.data)
@@ -1085,6 +1101,7 @@ class SessionBrowser(App):
 
     def on_key(self, event):
         """Handle vi keys and left/right arrows for tree navigation."""
+        self._mouse_input = False
         # Down arrow from search input jumps to the tree
         focused = self.focused
         if focused and getattr(focused, "id", None) == "search-input":
