@@ -144,7 +144,11 @@ solely on records Claude Code appends at the end of the file.
 The backwards walk at `:183-201` is **kept** (it parses lines already in the window at
 near-zero cost) but its output narrows:
 
-- `last_msg`: **kept**, feeds `_search` and the precedence-6 row fallback.
+- `last_msg`: **kept**, feeds `_search` and the precedence-6 row fallback. It uses the
+  **same user-record predicate as `last_assistant`** (excluding `isMeta` records and
+  tool_result carriers), not bare `_extract_user_text`. Otherwise a level-6 row can be
+  labeled with a hook injection or `[Request interrupted by user]`, which carries no tags
+  and so survives the `<...>` strip. One shared helper, written once.
 - `last_msgs_raw`: **retired.** Its only consumer is `_update_preview` (`:731-745`), and
   `Where I left off` supersedes it. `TAIL_CHAR_BUDGET` goes with it.
 - `first_msg`, `first_msg_raw`, `cwd`, `size`, `mtime`: unchanged.
@@ -460,6 +464,11 @@ summary (`c`). Rows fall back to `last_prompt` for the 42% of older sessions wit
 The currently-running session is appended to while being read. The existing per-line
 `try/except` covers a torn final line, and the next launch re-reads. No locking.
 
+The 128 KB window bound is empirical (see Key finding), and no re-read guard is added for
+it; that would be defensive code for a case that does not occur in 1,391 sessions. The
+consequence of a future miss is bounded and silent: nothing crashes, the affected field is
+simply absent, and the row falls to the next precedence level.
+
 ## Error handling
 
 Extraction failures on one session degrade to whatever fields parsed and never abort the
@@ -480,13 +489,14 @@ and a line in the README's Contributing section giving the explicit command
 
 Two test groups, covering the two things that will actually be wrong:
 
-1. **Label precedence**, table-driven across all six levels, including the
+1. **Label precedence**, table-driven across all seven levels, including the
    `ai_title_at_generation` comparison in three directions: unchanged (summary wins),
    changed (ai_title wins), and absent-on-both-sides coerced to `""` (summary wins).
 2. **Extraction, `clean_label()`, and `clean_body()`** over one fixture JSONL containing
    every record type, a malformed line, a partial first line, a `last-prompt` record
    missing its `lastPrompt` field, a `<synthetic>` terminal assistant record, an assistant
-   text block preceding the last user message, a `custom_title` with literal surrounding
+   text block preceding the last user message, an `isMeta` user record after the last real
+   one (the case that separates 87.3% from 74.9%), a `custom_title` with literal surrounding
    quotes, and a `last_prompt` containing XML tags.
 
 Broken extraction is obvious the moment the TUI opens; precedence is not. Beyond these,
