@@ -66,7 +66,7 @@ ICON_ARCHIVE = "\uf187"      #
 ICON_DELETE = "\uf1f8"       #
 ICON_RENAME = "\uf044"       #
 ICON_CLAUDE = "\uf120"       # terminal (app header)
-ICON_SUMMARY = "\u2728"      # sparkles: a summary you generated
+ICON_SUMMARY = "\uf005"      # star: a summary you generated
 ICON_AI = "\uf0d0"          # magic wand: a title Claude Code generated
 ICON_NONE = "\uf10c"        # empty circle: no title exists for this session
 
