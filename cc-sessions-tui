@@ -68,7 +68,7 @@ ICON_RENAME = "\uf044"       #
 ICON_CLAUDE = "\uf120"       # terminal (app header)
 ICON_MAGIC = "\uf0d0"       # magic wand: a summary you generated
 ICON_AI = "\uf0eb"          # lightbulb: a title Claude Code generated
-ICON_QUOTE = "\uf10d"       # quote: raw transcript text, not a title
+ICON_NONE = "\uf10c"        # empty circle: no title exists for this session
 
 
 def human_size(nbytes: int) -> str:
@@ -181,9 +181,9 @@ LABEL_SOURCES = {
     "custom":  (ICON_RENAME, "the name set with /rename in Claude Code"),
     "summary": (ICON_MAGIC, "a summary you generated"),
     "ai":      (ICON_AI, "Claude Code's generated title"),
-    "prompt":  (ICON_QUOTE, "your last prompt (no title yet)"),
-    "message": (ICON_QUOTE, "your last message (no title yet)"),
-    "id":      (ICON_QUOTE, "the session id (no title yet)"),
+    "prompt":  (ICON_NONE, "no title yet; showing your last prompt"),
+    "message": (ICON_NONE, "no title yet; showing your last message"),
+    "id":      (ICON_NONE, "no title yet; showing the session id"),
 }
 
 
@@ -584,6 +584,41 @@ class ConfirmDialog(ModalScreen[bool]):
         self.dismiss(False)
 
 
+class LegendScreen(ModalScreen[None]):
+    """What the row glyphs mean, and the order titles are chosen in."""
+
+    BINDINGS = [
+        Binding("escape", "close", "Close"),
+        Binding("question_mark", "close", "Close"),
+        Binding("q", "close", "Close"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        rows = Text()
+        rows.append("Row glyphs\n\n", style="bold")
+        for key in ("local", "custom", "summary", "ai", "prompt"):
+            glyph, desc = LABEL_SOURCES[key]
+            rows.append(f"  {glyph}  ", style="bold")
+            rows.append(f"{desc}\n", style="" if key != "prompt" else "italic")
+        rows.append("\nA dimmed italic row has no title yet, so you are\n"
+                    "reading raw transcript text. Press ", style="dim")
+        rows.append("c", style="bold")
+        rows.append(" to generate one.\n\n", style="dim")
+        rows.append("Title precedence\n\n", style="bold")
+        rows.append("  your name  →  /rename  →  your summary  →\n"
+                    "  Claude's title  →  last prompt  →  last message  →  id\n\n", style="dim")
+        rows.append("Resuming a session lets Claude write a new title,\n"
+                    "which then replaces a summary you generated.", style="dim")
+        yield Vertical(
+            Static(rows, id="legend-body"),
+            Static("[esc] Close", id="legend-keys"),
+            id="legend-dialog",
+        )
+
+    def action_close(self):
+        self.dismiss(None)
+
+
 # ---------------------------------------------------------------------------
 # Rename dialog
 # ---------------------------------------------------------------------------
@@ -636,6 +671,7 @@ class SessionCommands(Provider):
         ("Delete Session", "Permanently delete the selected session", "delete"),
         ("Rename Session", "Name or rename the selected session", "rename"),
         ("Summarize Session", "Generate a context summary with Haiku", "summarize"),
+        ("Show Legend", "What the row glyphs mean", "legend"),
         ("Toggle Skip Permissions", "Resume sessions with --dangerously-skip-permissions", "toggle_skip_perms"),
     ]
 
@@ -704,6 +740,19 @@ class SessionBrowser(App):
         padding: 0 1;
     }
 
+    #legend-dialog {
+        align: center middle;
+        width: 62;
+        height: auto;
+        border: thick $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+    #legend-keys {
+        color: $text-muted;
+        padding-top: 1;
+    }
+
     /* Confirm dialog */
     #confirm-dialog {
         align: center middle;
@@ -751,6 +800,7 @@ class SessionBrowser(App):
         Binding("shift+a", "archive_selected", "Arc All", show=False),
         Binding("n", "rename", f"{ICON_RENAME} Name"),
         Binding("c", "summarize", "Summarize"),
+        Binding("question_mark", "legend", "Legend"),
         Binding("space", "toggle_select", "Select", show=False),
         Binding("e", "expand_all", "Expand All"),
         Binding("shift+e", "collapse_all", "Collapse All", show=False),
@@ -1007,11 +1057,10 @@ class SessionBrowser(App):
         label, source = resolve_label(session, self.session_names, self.summaries)
         glyph, source_desc = LABEL_SOURCES[source]
         meta_bits = [f"`{session['cwd_short']}`", human_size(session["size"])]
-        parts = ["## " + label,
-                 f"{glyph} **Showing:** {source_desc}",
-                 " · ".join(meta_bits)]
+        parts = [f"## {glyph} {label}", " · ".join(meta_bits)]
         if source != "ai" and session.get("ai_title"):
-            parts.append(f"{ICON_AI} **Claude Code's title:** {session['ai_title']}")
+            # Different information, not a restatement: what Claude itself called this
+            parts.append(f"{ICON_AI} *{session['ai_title']}*")
 
         entry = self.summaries.get(sid) or {}
         if entry.get("body"):
@@ -1210,6 +1259,7 @@ class SessionBrowser(App):
             "delete": self.action_delete,
             "rename": self.action_rename,
             "summarize": self.action_summarize,
+            "legend": self.action_legend,
             "toggle_skip_perms": self._toggle_skip_perms,
         }
         if command in actions:
@@ -1316,6 +1366,9 @@ class SessionBrowser(App):
     def _summary_text(self, session_id: str) -> str:
         entry = self.summaries.get(session_id) or {}
         return (entry.get("title", "") + " " + entry.get("body", "")).lower()
+
+    def action_legend(self):
+        self.push_screen(LegendScreen())
 
     def action_summarize(self):
         tree = self.query_one("#session-tree", Tree)

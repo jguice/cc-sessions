@@ -70,6 +70,7 @@ Run `cc-sessions` from any terminal. You'll get a tree view of every Claude Code
 | `s` | Cycle sort mode (recency / size / name) |
 | `n` | Rename session |
 | `c` | Summarize session (Haiku) |
+| `?` | Glyph legend and title precedence |
 | `a` | Archive session |
 | `x` | Delete session |
 | `Space` | Multi-select |
@@ -95,16 +96,18 @@ Archived sessions are moved to `~/.claude/archived-sessions/`.
 
 Session names set via Claude's `/rename` command are read from the session file itself. Local names in `session-names.json` take priority when both exist.
 
-Row labels use the first available of these, and a glyph tells you which one you're looking at:
+Row labels use the first available of these, and a glyph tells you which one you're looking at. Press `?` in the app for this legend.
 
 | Glyph | Source |
 |-------|--------|
 | pencil | The name you set, or a `/rename` from inside Claude Code |
 | magic wand | A summary you generated with `c` |
 | lightbulb | The title Claude Code generated on its own |
-| quote *(dimmed italic)* | No title yet; showing your last prompt, last message, or the session id |
+| empty circle *(dimmed italic)* | No title yet; showing your last prompt, last message, or the session id |
 
-A dimmed italic row means Claude Code never generated a title for that session, so you're reading raw transcript text rather than a summary. The preview spells it out under the heading (**Showing:** ...), and when something other than Claude's title won the row it also shows Claude's title on its own line.
+A dimmed italic row means Claude Code never generated a title for that session, so you're reading raw transcript text rather than a summary. Press `c` to generate one.
+
+The preview carries the same glyph on its heading, and when something other than Claude's title won the row it also shows Claude's own title underneath in italics.
 
 A summary you generate outranks Claude's own title until Claude writes a new one, which happens when you resume the session.
 
