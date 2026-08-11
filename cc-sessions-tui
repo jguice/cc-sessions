@@ -66,8 +66,8 @@ ICON_ARCHIVE = "\uf187"      #
 ICON_DELETE = "\uf1f8"       #
 ICON_RENAME = "\uf044"       #
 ICON_CLAUDE = "\uf120"       # terminal (app header)
-ICON_MAGIC = "\u2728"        # sparkles: a summary you generated
-ICON_AI = "\uf0eb"          # lightbulb: a title Claude Code generated
+ICON_SUMMARY = "\u2728"      # sparkles: a summary you generated
+ICON_AI = "\uf0d0"          # magic wand: a title Claude Code generated
 ICON_NONE = "\uf10c"        # empty circle: no title exists for this session
 
 
@@ -179,7 +179,7 @@ def drop_summary(session_id: str):
 LABEL_SOURCES = {
     "local":   (ICON_RENAME, "a name you set (n, or /rename in Claude Code)"),
     "custom":  (ICON_RENAME, "a name you set (n, or /rename in Claude Code)"),
-    "summary": (ICON_MAGIC, "a summary you generated"),
+    "summary": (ICON_SUMMARY, "a summary you generated"),
     "ai":      (ICON_AI, "Claude Code's generated title"),
     "prompt":  (ICON_NONE, "no title yet; showing raw transcript text"),
     "message": (ICON_NONE, "no title yet; showing your last message"),
