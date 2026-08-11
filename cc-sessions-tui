@@ -66,6 +66,7 @@ ICON_ARCHIVE = "\uf187"      #
 ICON_DELETE = "\uf1f8"       #
 ICON_RENAME = "\uf044"       #
 ICON_CLAUDE = "\uf544"       #
+ICON_MAGIC = "\uf0d0"       # summary you generated
 
 
 def human_size(nbytes: int) -> str:
@@ -171,27 +172,40 @@ def drop_summary(session_id: str):
     os.replace(tmp, SUMMARIES_FILE)
 
 
-def resolve_label(session: dict, names: dict, summaries: dict) -> str:
-    """Seven-level precedence for a session's display label."""
+# Where a row's label came from. Shown in the list as a glyph and named in the preview,
+# so it is always clear whether you are reading a real title or just raw transcript text.
+LABEL_SOURCES = {
+    "local":   (ICON_RENAME, "your name"),
+    "custom":  (ICON_RENAME, "renamed in Claude Code"),
+    "summary": (ICON_MAGIC, "your generated summary"),
+    "ai":      (ICON_CLAUDE, "Claude Code's title"),
+    "prompt":  ("", "no title; your last prompt"),
+    "message": ("", "no title; your last message"),
+    "id":      ("", "no title; session id"),
+}
+
+
+def resolve_label(session: dict, names: dict, summaries: dict):
+    """Seven-level precedence. Returns (label, source) where source keys LABEL_SOURCES."""
     sid = session["session_id"]
     local = names.get(sid, "")
     if local:
-        return local
+        return local, "local"
     if session.get("custom_title"):
-        return session["custom_title"]
+        return session["custom_title"], "custom"
     entry = summaries.get(sid) or {}
     if entry.get("title"):
         # A saved summary wins only while the ai-title it overrode is unchanged.
         # If Claude wrote a genuinely new title since, that new title supersedes it.
         if clean_label(entry.get("ai_title_at_generation") or "") == (session.get("ai_title") or ""):
-            return entry["title"]
+            return entry["title"], "summary"
     if session.get("ai_title"):
-        return session["ai_title"]
+        return session["ai_title"], "ai"
     if session.get("last_prompt"):
-        return session["last_prompt"]
+        return session["last_prompt"], "prompt"
     if session.get("last_msg"):
-        return session["last_msg"]
-    return sid[:12]
+        return session["last_msg"], "message"
+    return sid[:12], "id"
 
 
 def _extract_user_text(d):
@@ -869,6 +883,7 @@ class SessionBrowser(App):
                     "age": human_age(s["age"]),
                     "size": human_size(s["size"]),
                     "label": resolve_label(s, self.session_names, self.summaries),
+                    "summary_stale": self._is_summary_stale(s),
                     "selected": s["session_id"] in self.selected_ids,
                 })
             prepared.append((cwd, item_data))
@@ -903,9 +918,19 @@ class SessionBrowser(App):
                 label.append(f"{ICON_CLOCK} {item['age']:>7} ", style=f"{accent}")
                 label.append(f"{ICON_SIZE} {item['size']:>7}", style="dim")
                 label.append("  ", style="")
-                label.append(item["label"], style=f"{secondary}")
+                text, source = item["label"]
+                glyph, _ = LABEL_SOURCES[source]
+                if glyph:
+                    label.append(f"{glyph} ", style="dim")
+                if source in ("local", "custom"):
+                    label.append(text, style=f"bold {secondary}")
+                elif source in ("summary", "ai"):
+                    label.append(text, style=f"{secondary}")
+                else:
+                    # Not a title: raw transcript text, dimmed so it reads as a fallback
+                    label.append(text, style="dim italic")
                 tail = s.get("last_prompt", "")
-                if tail and tail != item["label"]:
+                if tail and tail != text and source != "prompt":
                     label.append(f"  · {clean_label(tail)}", style="dim")
 
                 leaf = dir_node.add_leaf(label)
@@ -973,9 +998,13 @@ class SessionBrowser(App):
             return
 
         sid = session["session_id"]
-        label = resolve_label(session, self.session_names, self.summaries)
+        label, source = resolve_label(session, self.session_names, self.summaries)
+        glyph, source_desc = LABEL_SOURCES[source]
         meta_bits = [f"`{session['cwd_short']}`", human_size(session["size"])]
-        parts = ["## " + label, " · ".join(meta_bits)]
+        parts = ["## " + label, f"*{(glyph + ' ') if glyph else ''}{source_desc}*",
+                 " · ".join(meta_bits)]
+        if source != "ai" and session.get("ai_title"):
+            parts.append(f"*Claude Code's own title: {session['ai_title']}*")
 
         entry = self.summaries.get(sid) or {}
         if entry.get("body"):
@@ -1217,7 +1246,7 @@ class SessionBrowser(App):
         node = tree.cursor_node
         if node and node.data:
             s = node.data
-            name = resolve_label(s, self.session_names, self.summaries)
+            name = resolve_label(s, self.session_names, self.summaries)[0]
             self.push_screen(
                 ConfirmDialog(f"Delete session '{name}' permanently?"),
                 callback=lambda ok: self._do_delete([s]) if ok else None,
@@ -1228,7 +1257,7 @@ class SessionBrowser(App):
         node = tree.cursor_node
         if node and node.data:
             s = node.data
-            name = resolve_label(s, self.session_names, self.summaries)
+            name = resolve_label(s, self.session_names, self.summaries)[0]
             self.push_screen(
                 ConfirmDialog(f"Archive session '{name}'?"),
                 callback=lambda ok: self._do_archive([s]) if ok else None,
@@ -1262,6 +1291,10 @@ class SessionBrowser(App):
                 RenameDialog(current),
                 callback=lambda name: self._do_rename(sid, name),
             )
+
+    def _is_summary_stale(self, session: dict) -> bool:
+        entry = self.summaries.get(session["session_id"]) or {}
+        return bool(entry) and entry.get("session_mtime", 0) < session["mtime"]
 
     def _summary_text(self, session_id: str) -> str:
         entry = self.summaries.get(session_id) or {}

@@ -49,39 +49,48 @@ def _session(**kw):
 
 @pytest.mark.parametrize("label,session,names,summaries,expected", [
     ("1 local name beats everything",
-     _session(custom_title="C", ai_title="A"), {SID: "LOCAL"}, {}, "LOCAL"),
+     _session(custom_title="C", ai_title="A"), {SID: "LOCAL"}, {}, ("LOCAL", "local")),
     ("2 custom_title beats ai_title",
-     _session(custom_title="C", ai_title="A"), {}, {}, "C"),
+     _session(custom_title="C", ai_title="A"), {}, {}, ("C", "custom")),
     ("3 summary wins while ai_title unchanged",
      _session(ai_title="A"), {},
-     {SID: {"title": "S", "ai_title_at_generation": "A"}}, "S"),
+     {SID: {"title": "S", "ai_title_at_generation": "A"}}, ("S", "summary")),
     ("4 a genuinely new ai_title supersedes the summary",
      _session(ai_title="NEW"), {},
-     {SID: {"title": "S", "ai_title_at_generation": "A"}}, "NEW"),
+     {SID: {"title": "S", "ai_title_at_generation": "A"}}, ("NEW", "ai")),
     ("3 absent-on-both-sides coerces to empty and the summary wins",
-     _session(), {}, {SID: {"title": "S", "ai_title_at_generation": ""}}, "S"),
+     _session(), {}, {SID: {"title": "S", "ai_title_at_generation": ""}}, ("S", "summary")),
     ("3 a missing ai_title_at_generation key reads as empty",
-     _session(), {}, {SID: {"title": "S"}}, "S"),
+     _session(), {}, {SID: {"title": "S"}}, ("S", "summary")),
     ("4 a session with no title at generation that later gains one loses the row",
-     _session(ai_title="A"), {}, {SID: {"title": "S"}}, "A"),
+     _session(ai_title="A"), {}, {SID: {"title": "S"}}, ("A", "ai")),
     ("4 ai_title beats last_prompt",
-     _session(ai_title="A", last_prompt="P"), {}, {}, "A"),
+     _session(ai_title="A", last_prompt="P"), {}, {}, ("A", "ai")),
     ("5 last_prompt beats last_msg",
-     _session(last_prompt="P", last_msg="M"), {}, {}, "P"),
+     _session(last_prompt="P", last_msg="M"), {}, {}, ("P", "prompt")),
     ("6 last_msg rescues a session with no prompt record",
-     _session(last_msg="M"), {}, {}, "M"),
+     _session(last_msg="M"), {}, {}, ("M", "message")),
     ("7 terminal fallback is the session id prefix",
-     _session(), {}, {}, SID[:12]),
+     _session(), {}, {}, (SID[:12], "id")),
 ])
 def test_label_precedence(label, session, names, summaries, expected):
     assert cct.resolve_label(session, names, summaries) == expected
+
+
+def test_every_source_key_is_describable():
+    """Every precedence level must be nameable in the preview, or the user cannot tell
+    Claude Code's own title apart from raw transcript text."""
+    for key in ("local", "custom", "summary", "ai", "prompt", "message", "id"):
+        assert key in cct.LABEL_SOURCES
+        _, description = cct.LABEL_SOURCES[key]
+        assert description
 
 
 def test_equality_test_normalizes_both_sides():
     """A stored raw title must still match the cleaned extracted one."""
     session = _session(ai_title=cct.clean_label('"Quoted"'))
     summaries = {SID: {"title": "S", "ai_title_at_generation": '"Quoted"'}}
-    assert cct.resolve_label(session, {}, summaries) == "S"
+    assert cct.resolve_label(session, {}, summaries) == ("S", "summary")
 
 
 # ---------------------------------------------------------------------------

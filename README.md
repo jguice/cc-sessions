@@ -94,7 +94,18 @@ Archived sessions are moved to `~/.claude/archived-sessions/`.
 
 Session names set via Claude's `/rename` command are read from the session file itself. Local names in `session-names.json` take priority when both exist.
 
-Row labels use the first of: your local name, Claude's `/rename` name, a summary you generated with `c`, the title Claude Code generated, the last prompt, the last message, the session id. A summary you generate outranks Claude's own title until Claude writes a new one, which happens when you resume the session.
+Row labels use the first available of these, and a glyph tells you which one you're looking at:
+
+| Glyph | Source |
+|-------|--------|
+|  | Your name, or a `/rename` from inside Claude Code |
+|  | A summary you generated with `c` |
+|  | The title Claude Code generated on its own |
+| *(none, dimmed italic)* | No title exists; showing your last prompt, last message, or the session id |
+
+A dimmed italic row means Claude Code never generated a title for that session, so you're reading raw transcript text rather than a summary. The preview names the source explicitly, and when something other than Claude's title won the row it also shows Claude's title underneath.
+
+A summary you generate outranks Claude's own title until Claude writes a new one, which happens when you resume the session.
 
 ## Uninstall
 
