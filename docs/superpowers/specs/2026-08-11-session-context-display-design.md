@@ -144,10 +144,10 @@ solely on records Claude Code appends at the end of the file.
 The backwards walk at `:183-201` is **kept** (it parses lines already in the window at
 near-zero cost) but its output narrows:
 
-- `last_msg`; **kept**, feeds `_search` and the precedence-6 row fallback.
-- `last_msgs_raw`; **retired.** Its only consumer is `_update_preview` (`:731-745`), and
+- `last_msg`: **kept**, feeds `_search` and the precedence-6 row fallback.
+- `last_msgs_raw`: **retired.** Its only consumer is `_update_preview` (`:731-745`), and
   `Where I left off` supersedes it. `TAIL_CHAR_BUDGET` goes with it.
-- `first_msg`, `first_msg_raw`, `cwd`, `size`, `mtime`; unchanged.
+- `first_msg`, `first_msg_raw`, `cwd`, `size`, `mtime`: unchanged.
 
 The head-50 read for `cwd` and `first_msg` is unchanged, as is the `if cwd:` rule at `:208`
 that skips sessions with no `cwd` (currently 0 sessions).
@@ -173,13 +173,13 @@ A single `clean_label()` applied to everything would mangle the summary body: co
 newlines flattens prose, a title-sized cap decapitates it, and stripping `<...>` eats
 `<Component>`, generics, and shell redirects in text about code.
 
-- **`clean_label(s, max_len=200)`**; for row-label and heading sources (`ai_title`,
+- **`clean_label(s, max_len=200)`**: for row-label and heading sources (`ai_title`,
   `custom_title`, `last_prompt`, `last_msg`, summary title). Strips `<...>` tags (matching
   `_extract_user_text` at `:139-141`; `last_prompt` currently bypasses this and real values
   contain raw XML and embedded JSON), collapses newlines and control characters to spaces,
   strips surrounding double quotes (2 of 36 `custom_title` values carry literal quotes),
   collapses whitespace runs, truncates to `max_len`.
-- **`clean_body(s, max_len=2000)`**; for the summary body and `last_assistant`. Strips
+- **`clean_body(s, max_len=2000)`**: for the summary body and `last_assistant`. Strips
   control characters, preserves newlines, demotes leading `#` runs to bold so injected
   model text cannot open a heading that sits as a peer of the preview's own sections,
   truncates to `max_len`, then **balances code fences**: if the result contains an odd
@@ -266,7 +266,7 @@ replaced by a machine one on next resume.
 ### Search
 
 `_search` (`:226`, filtered at `:625`) currently indexes `first_msg + last_msg + cwd_short
-+ session_id`. It gains `ai_title`, `custom_title`, and `last_prompt`; all static for the
++ session_id`. It gains `ai_title`, `custom_title`, and `last_prompt`, all static for the
 lifetime of a load, so they are safe to prebuild.
 
 **Local names and summaries stay in the live filter expression** alongside the existing
