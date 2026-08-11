@@ -753,7 +753,7 @@ class SessionBrowser(App):
         self.session_names = {}
         self.summaries = load_summaries()
         self._summarizing = set()
-        self.sort_mode = "name"
+        self.sort_mode = "recency"
         self.selected_ids: Set[str] = set()
         self.filter_text = ""
         self._resume_session = None  # set when user picks a session to resume
@@ -967,6 +967,10 @@ class SessionBrowser(App):
                 head += " · session has changed since"
             parts += ["### Summary", head + "*", entry["body"]]
 
+        if session.get("first_msg_raw"):
+            parts += ["### Started with",
+                      prepare_markdown(clean_body(session["first_msg_raw"]))]
+
         if session.get("last_prompt") or session.get("last_assistant"):
             parts.append("### Where I left off")
             if session.get("last_prompt"):
@@ -984,10 +988,6 @@ class SessionBrowser(App):
                 parts.append(f"- `{rel}`")
             if len(files) > len(shown):
                 parts.append(f"- *+{len(files) - len(shown)} more*")
-
-        if session.get("first_msg_raw"):
-            parts += ["### Started with",
-                      prepare_markdown(clean_body(session["first_msg_raw"]))]
 
         parts.append(f"---\n\n*`{sid}`*")
         preview.update("\n\n".join(parts))
