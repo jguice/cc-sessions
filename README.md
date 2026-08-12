@@ -96,7 +96,7 @@ Runs against a throwaway set of fictional sessions in a temp directory instead o
 
 Nothing is mocked. Demo mode only repoints the paths, so search, sort, rename, archive, delete, the preview and `c` all run their real code paths against real (fake) session files. Archive and delete only touch the temp copies, and demo renames and summaries go to a temp config dir rather than your own. `Enter` reports the session it would resume instead of resuming, since the directories are fictional.
 
-The fixture covers every label source, folder grouping, a session with a saved summary, sessions with no title, and a range of sizes and ages.
+The fixture covers all four label glyphs, folder grouping, a session with a saved summary, sessions with no title, and a range of sizes and ages.
 
 ## Config
 
