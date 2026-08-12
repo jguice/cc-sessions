@@ -125,6 +125,8 @@ The preview carries the same glyph on its heading, and when something other than
 
 A summary you generate outranks Claude's own title until Claude writes a new one, which happens when you resume the session.
 
+`c` shells out to the `claude` CLI with Haiku, so it uses the login you already have; there is no API key to set. It does spend that account's usage. A summary takes roughly ten seconds, with a spinner and elapsed time on the row while it runs, and a failed call leaves any previous summary in place.
+
 ## Uninstall
 
 ```bash
