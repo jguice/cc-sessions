@@ -139,7 +139,7 @@ Remove the `source` line from `~/.bashrc` and/or `~/.zshrc` if present.
 
 ## Contributing
 
-Issues and PRs welcome. No formal build or release automation yet; just run `./install.sh` locally to try your changes.
+[Issues](https://github.com/liatrio-labs/cc-sessions/issues) and PRs welcome. No formal build or release automation yet; just run `./install.sh` locally to try your changes.
 
 Tests cover extraction, sanitizing, and label precedence:
 
