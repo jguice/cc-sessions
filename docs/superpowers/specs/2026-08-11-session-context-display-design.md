@@ -565,3 +565,32 @@ titles, so `load_sessions` reads the window once rather than twice. Full load of
 sessions measures 0.80s.
 
 **`git_branch` was dropped** before implementation; see the Key finding section.
+
+## Follow-on work
+
+Shipped after v0.6.0, in response to using the tool rather than from this design.
+
+**Demo mode (`--demo`).** Writes a throwaway projects tree of fictional sessions to a
+temp dir and repoints `PROJECTS_BASE`, `ARCHIVE_DIR` and `CONFIG_DIR` at it. Nothing is
+mocked; the point is that every feature, including the real `claude -p` call, runs its
+normal code path against real files that happen to be fake. Destructive actions can only
+reach the temp copies, and `Enter` reports the session it would resume rather than
+resuming a fictional directory. Fixture padding stands in for tool output so sizes look
+real, but is omitted after the final turn so the closing exchange stays inside the tail
+window and `Where I left off` shows both halves.
+
+**Rich markup was eating dialog key hints.** `Static("[esc] Close")` parses `[esc]` as a
+style tag, so every dialog silently rendered "Close" with a gap. Pre-existing in the
+confirm and rename dialogs. All three now pass `markup=False`.
+
+**The legend closes on click.** The keys line is a hint, not a button. Deliberately not
+applied to the confirm and rename dialogs, where dismissing on a stray click would be
+wrong.
+
+**Search state is visible and escapable.** Hiding the bar on `Enter` left no sign the list
+was filtered and no way out but retyping the term. The bar stays while a filter is active,
+the status bar reports `"term" · N of M · esc to clear`, and `esc` clears before it quits.
+The filter predicate moved to `_matches` so the count and the list cannot diverge.
+
+**The search bar was covering the header.** It carried `dock: top` exactly like `Header`,
+so both resolved to row 0. Undocked, and reduced from three rows to one.
