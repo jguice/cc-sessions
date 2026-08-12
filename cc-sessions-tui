@@ -941,12 +941,15 @@ class SessionBrowser(App):
         border-left: solid $accent;
     }
     #search-bar {
-        dock: top;
-        height: 3;
+        height: 1;
         display: none;
     }
     #search-input {
         width: 100%;
+        height: 1;
+        border: none;
+        padding: 0 1;
+        background: $surface;
     }
     #status-bar {
         dock: bottom;
