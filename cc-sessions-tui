@@ -823,9 +823,13 @@ class LegendScreen(ModalScreen[None]):
                     "which then replaces a summary you generated.", style="dim")
         yield Vertical(
             Static(rows, id="legend-body"),
-            Static("[esc] Close", id="legend-keys"),
+            Static("Click anywhere or press [esc] to close", id="legend-keys"),
             id="legend-dialog",
         )
+
+    def on_click(self, event):
+        # The keys line is a hint, not a button; the whole overlay closes on click
+        self.dismiss(None)
 
     def action_close(self):
         self.dismiss(None)
