@@ -780,7 +780,7 @@ class ConfirmDialog(ModalScreen[bool]):
     def compose(self) -> ComposeResult:
         yield Vertical(
             Static(self.message, id="confirm-message"),
-            Static("[y] Yes  [n] No", id="confirm-keys"),
+            Static("[y] Yes  [n] No", id="confirm-keys", markup=False),
             id="confirm-dialog",
         )
 
@@ -823,7 +823,7 @@ class LegendScreen(ModalScreen[None]):
                     "which then replaces a summary you generated.", style="dim")
         yield Vertical(
             Static(rows, id="legend-body"),
-            Static("Click anywhere or press [esc] to close", id="legend-keys"),
+            Static("Click anywhere or press [esc] to close", id="legend-keys", markup=False),
             id="legend-dialog",
         )
 
@@ -854,7 +854,7 @@ class RenameDialog(ModalScreen[str]):
         yield Vertical(
             Static("Enter session name:", id="rename-label"),
             Input(value=self.current_name, id="rename-input"),
-            Static("[enter] Save  [esc] Cancel", id="rename-keys"),
+            Static("[enter] Save  [esc] Cancel", id="rename-keys", markup=False),
             id="rename-dialog",
         )
 
