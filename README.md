@@ -29,9 +29,9 @@ Claude Code scatters session history across every project directory you've ever 
 
 ## Install
 
+Clone this repo, then:
+
 ```bash
-git clone https://github.com/liatrio-labs/cc-sessions.git
-cd cc-sessions
 ./install.sh
 ```
 
@@ -139,7 +139,7 @@ Remove the `source` line from `~/.bashrc` and/or `~/.zshrc` if present.
 
 ## Contributing
 
-[Issues](https://github.com/liatrio-labs/cc-sessions/issues) and PRs welcome. No formal build or release automation yet; just run `./install.sh` locally to try your changes.
+Issues and PRs welcome. No formal build or release automation yet; just run `./install.sh` locally to try your changes.
 
 Tests cover extraction, sanitizing, and label precedence:
 
