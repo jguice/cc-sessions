@@ -1137,13 +1137,7 @@ class SessionBrowser(App):
         """Filter and group sessions, return lightweight data for tree assembly."""
         filtered = self.sessions
         if self.filter_text:
-            ft = self.filter_text.lower()
-            filtered = [
-                s for s in self.sessions
-                if ft in s["_search"]
-                or ft in self.session_names.get(s["session_id"], "").lower()
-                or ft in self._summary_text(s["session_id"])
-            ]
+            filtered = [s for s in self.sessions if self._matches(s)]
         groups = group_sessions(filtered, self.sort_mode)
         # Pre-compute label parts as plain data
         prepared = []
@@ -1244,7 +1238,8 @@ class SessionBrowser(App):
         if selected:
             parts.append(f"{selected} selected")
         if self.filter_text:
-            parts.append(f"Filter: {self.filter_text}")
+            shown = sum(1 for x in self.sessions if self._matches(x))
+            parts.append(f"{ICON_SEARCH} \"{self.filter_text}\" · {shown} of {total} · esc to clear")
         if self._summarizing:
             self._render_spinner_status(parts)
             return
@@ -1416,7 +1411,11 @@ class SessionBrowser(App):
             event.prevent_default()
         elif event.key == "escape":
             search_bar = self.query_one("#search-bar")
-            if search_bar.styles.display != "none":
+            if self.filter_text:
+                self._clear_search()
+                self._close_search()
+                event.prevent_default()
+            elif search_bar.styles.display != "none":
                 self._close_search()
                 event.prevent_default()
 
@@ -1438,6 +1437,9 @@ class SessionBrowser(App):
 
     def on_input_changed(self, event: Input.Changed):
         if event.input.id == "search-input":
+            # Clearing the box on close fires this too; ignore it once the bar is gone
+            if self.query_one("#search-bar").styles.display == "none":
+                return
             self.filter_text = event.value
             if hasattr(self, "_search_timer") and self._search_timer is not None:
                 self._search_timer.stop()
@@ -1451,8 +1453,12 @@ class SessionBrowser(App):
 
     def on_input_submitted(self, event: Input.Submitted):
         if event.input.id == "search-input":
-            self.query_one("#search-bar").styles.display = "none"
-            self.query_one("#session-tree", Tree).focus()
+            # Keep the bar visible while a filter is active: hiding it left no clear
+            # sign the list was filtered, and no way to clear it but retyping.
+            if self.filter_text:
+                self.query_one("#session-tree", Tree).focus()
+            else:
+                self._close_search()
 
 
     def action_expand_all(self):
@@ -1504,7 +1510,12 @@ class SessionBrowser(App):
         self.notify(f"Skip permissions: {state}")
 
     def _clear_search(self):
+        if getattr(self, "_search_timer", None) is not None:
+            self._search_timer.stop()
+            self._search_timer = None
         self.filter_text = ""
+        self.query_one("#search-bar").styles.display = "none"
+        self.query_one("#search-input", Input).value = ""
         self._rebuild_tree()
         self._update_status()
 
@@ -1582,6 +1593,14 @@ class SessionBrowser(App):
     def _is_summary_stale(self, session: dict) -> bool:
         entry = self.summaries.get(session["session_id"]) or {}
         return bool(entry) and entry.get("session_mtime", 0) < session["mtime"]
+
+    def _matches(self, session: dict) -> bool:
+        """Filter predicate. Titles are prebuilt into _search; names and summaries are
+        matched live because both change while the app is running."""
+        ft = self.filter_text.lower()
+        return (ft in session["_search"]
+                or ft in self.session_names.get(session["session_id"], "").lower()
+                or ft in self._summary_text(session["session_id"]))
 
     def _summary_text(self, session_id: str) -> str:
         entry = self.summaries.get(session_id) or {}

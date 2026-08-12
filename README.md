@@ -57,7 +57,8 @@ Run `cc-sessions` from any terminal. You'll get a tree view of every Claude Code
 
 - Navigate with arrows or `h/j/k/l`
 - Press `Enter` on a session to **resume it**, or click it once to preview and again to resume (cc-sessions will `cd` to the session's original working directory and run `claude --resume <id>`)
-- Press `/` to search, `s` to cycle sort modes, `n` to name a session
+- Press `/` to search. The search bar stays visible while a filter is active, and the status bar shows how many matched. Press `esc` to clear it
+- Press `s` to cycle sort modes, `n` to name a session
 - Press `ctrl-p` for the full command palette
 
 ## Keybindings
@@ -67,6 +68,7 @@ Run `cc-sessions` from any terminal. You'll get a tree view of every Claude Code
 | `Enter` | Resume selected session |
 | Click | First click previews, second click resumes |
 | `/` | Search / filter |
+| `Esc` | Clear an active filter (or quit) |
 | `s` | Cycle sort mode (recency / size / name) |
 | `n` | Rename session |
 | `c` | Summarize session (Haiku) |
